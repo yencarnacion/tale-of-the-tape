@@ -1128,6 +1128,11 @@ func (s *Server) equity(w http.ResponseWriter, r *http.Request) {
 	}
 	var x []map[string]any
 	var eq, highWater int64
+	if len(ts) > 0 {
+		// Anchor closed-trade equity at the first entry so the first realized
+		// result is visible as a move from zero instead of an isolated endpoint.
+		x = append(x, map[string]any{"time": ts[len(ts)-1].EntryAt / 1_000_000, "value": float64(0)})
+	}
 	for i := len(ts) - 1; i >= 0; i-- {
 		eq += ts[i].Net
 		if eq > highWater {

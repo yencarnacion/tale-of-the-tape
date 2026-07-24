@@ -141,6 +141,69 @@ func TestBreakdownsShareTheDateFilteredPopulation(t *testing.T) {
 	}
 }
 
+func TestEquityStartsAtZeroAtTheFirstTradeEntry(t *testing.T) {
+	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	rows := []positions.Execution{
+		{Account: "a", Symbol: "ABC", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "ABC", Action: "sell", Quantity: 1, Price: 11 * positions.Scale, At: at.Add(time.Minute), Row: 2},
+	}
+	if _, _, err = st.Commit(context.Background(), "equity-origin", "equity.csv", rows, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	New(config.Defaults(), st).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/analytics/equity?start=2026-01-02&end=2026-01-02", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d %s", w.Code, w.Body.String())
+	}
+	var got []struct {
+		Time  int64   `json:"time"`
+		Value float64 `json:"value"`
+	}
+	if err = json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Time != at.Unix() || got[0].Value != 0 || got[1].Value != 1 {
+		t.Fatalf("unexpected equity series: %#v", got)
+	}
+}
+
+func TestCalendarSharesTheDateFilteredPopulation(t *testing.T) {
+	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	rows := []positions.Execution{
+		{Account: "a", Symbol: "ABC", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "ABC", Action: "sell", Quantity: 1, Price: 11 * positions.Scale, At: at.Add(time.Minute), Row: 2},
+		{Account: "a", Symbol: "XYZ", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at.AddDate(0, 0, 1), Row: 3},
+		{Account: "a", Symbol: "XYZ", Action: "sell", Quantity: 1, Price: 11 * positions.Scale, At: at.AddDate(0, 0, 1).Add(time.Minute), Row: 4},
+	}
+	if _, _, err = st.Commit(context.Background(), "calendar-dates", "calendar.csv", rows, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	New(config.Defaults(), st).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/calendar?start=2026-01-02&end=2026-01-02", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d %s", w.Code, w.Body.String())
+	}
+	var got map[string]struct {
+		Trades int `json:"trades"`
+	}
+	if err = json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got["2026-01-02"].Trades != 1 {
+		t.Fatalf("unexpected calendar entries: %#v", got)
+	}
+}
+
 func TestDatesRejectEndBeforeStart(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/?start=2026-01-03&end=2026-01-02", nil)
 	if _, _, err := New(config.Defaults(), nil).dates(r); err == nil {

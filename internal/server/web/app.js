@@ -24,6 +24,7 @@ function filters() {
   return `<section class="range-filter"><div class="toolbar"><button class="${datePreset === 'week' ? 'active' : ''}" onclick="setDatePreset('week')">This week</button><button class="${datePreset === 'month' ? 'active' : ''}" onclick="setDatePreset('month')">Month to date</button><button class="${datePreset === 'year' ? 'active' : ''}" onclick="setDatePreset('year')">Year to date</button><label>Start <input id="start" type="date" value="${dateStart}"></label><label>End <input id="end" type="date" value="${dateEnd}"></label><button onclick="applyDates()">Apply</button><button class="${!dateStart && !dateEnd ? 'active' : ''}" onclick="clearDates()">All dates</button>${dateStart && dateEnd ? '<button onclick="enrichRange()">Calculate range MFE / MAE</button>' : ''}</div><p><strong>${label}</strong></p></section>`;
 }
 const localDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const clockTime = time => new Date(Number(time) * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 function setDatePreset(period) {
   const end = new Date(), start = new Date(end);
   if (period === 'week') start.setDate(end.getDate() - ((end.getDay() + 6) % 7));
@@ -35,6 +36,12 @@ function setDatePreset(period) {
 }
 function applyDates() { dateStart = $('#start').value; dateEnd = $('#end').value; datePreset = ''; localStorage.setItem('tale-date-range', JSON.stringify({ start: dateStart, end: dateEnd, preset: '' })); render(); }
 function clearDates() { dateStart = ''; dateEnd = ''; datePreset = ''; localStorage.removeItem('tale-date-range'); render(); }
+function dateIsInRange(date) { return (!dateStart || date >= dateStart) && (!dateEnd || date <= dateEnd); }
+function calendarRange(start, end) {
+  const from = dateStart && dateStart > start ? dateStart : start;
+  const to = dateEnd && dateEnd < end ? dateEnd : end;
+  return from > to ? '' : `start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`;
+}
 async function enrichRange() {
   const result = await api('/api/v1/enrichment/range' + query(), { method: 'POST' });
   const failures = Object.keys(result.failed || {}).length;
@@ -83,10 +90,15 @@ async function dashboard() {
     metric('Raw Kelly', kelly(summary.raw_kelly ?? summary.preliminary_raw_kelly, preliminaryKelly)), metric('Half Kelly', kelly(summary.half_kelly ?? summary.preliminary_half_kelly, preliminaryKelly)), metric('Max drawdown', money(summary.max_drawdown * 1e6), 'red'), metric('Avg MFE', summary.average_mfe == null ? 'N/A' : money(summary.average_mfe * 1e6), 'green'), metric('Avg MAE', summary.average_mae == null ? 'N/A' : money(summary.average_mae * 1e6), 'red'), metric('Max win streak', summary.max_win_streak), metric('Max loss streak', summary.max_loss_streak)
   ].join('')}</div><section class="panel"><h2>Detailed statistics</h2><table><tbody>${detailed.map(([name, value]) => `<tr><th>${name}</th><td>${value}</td></tr>`).join('')}</tbody></table><p class="muted">SQN requires at least 30 trades. Probability of random chance is the exact two-sided binomial probability for the observed win/loss split. Volume counts shares opened per completed round trip.</p></section><section class="panel"><h2>Closed-trade equity & drawdown</h2><div id="equity-chart" class="small-chart"></div></section>${patterns(breakdown.tag, 'Performance by tag')}${patterns(breakdown.symbol, 'Performance by symbol')}<section class="panel"><h2>Review, not execution</h2><p class="muted">Metrics use net P&L after commissions and fees. Kelly is analytical only and highly sample-sensitive.</p></section>`;
 }
-function drawEquity(points, drawdown, selector = '#equity-chart') {
+function drawEquity(points, drawdown, selector = '#equity-chart', intraday = false) {
   const el = $(selector);
   if (!el || !points?.length) { if (el) el.textContent = 'No closed trades in this range.'; return; }
-  const chart = LightweightCharts.createChart(el, { height: 220, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
+  const options = { height: 220, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } };
+  if (intraday) {
+    options.localization = { timeFormatter: clockTime };
+    options.timeScale = { timeVisible: true, secondsVisible: false, tickMarkFormatter: clockTime };
+  }
+  const chart = LightweightCharts.createChart(el, options);
   const line = chart.addSeries(LightweightCharts.LineSeries, { color: '#58a6ff', lineWidth: 2 });
   line.setData(points); if (drawdown?.length) { const risk = chart.addSeries(LightweightCharts.LineSeries, { color: '#f85149', lineWidth: 1, lastValueVisible: false }); risk.setData(drawdown); } chart.timeScale().fitContent();
 }
@@ -137,7 +149,7 @@ async function loadChart(id, timeframe = '1m', mode = 'focus') {
   status.textContent = data.status + (data.source ? ` · ${data.source}` : ''); el.innerHTML = '';
   bindIndicatorControls(id, timeframe, mode);
   if (!data.bars?.length) return;
-  const chart = LightweightCharts.createChart(el, { height: 340, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
+  const chart = LightweightCharts.createChart(el, { height: 340, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, localization: { timeFormatter: clockTime }, timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: clockTime }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
   const candles = chart.addSeries(LightweightCharts.CandlestickSeries);
   candles.setData(data.bars.map(bar => ({ time: Math.floor(bar.time / 1000), open: bar.open, high: bar.high, low: bar.low, close: bar.close })));
   const markers = (data.executions || []).map(e => ({ time: Math.floor(new Date(e.at).getTime() / 1000), position: e.action === 'buy' ? 'belowBar' : 'aboveBar', color: e.action === 'buy' ? '#3fb950' : '#f85149', shape: e.action === 'buy' ? 'arrowUp' : 'arrowDown', text: `${e.action.toUpperCase()} ${e.quantity} @ ${(e.price / 1e6).toFixed(2)}` }));
@@ -157,7 +169,8 @@ async function enrich(id) { try { const result = await api(`/api/v1/trades/${id}
 async function calendar() {
   const year = calendarMonth.getFullYear(), month = calendarMonth.getMonth(), first = new Date(year, month, 1), last = new Date(year, month + 1, 0);
   const lead = first.getDay(), gridStart = new Date(year, month, 1 - lead), trail = 6 - last.getDay(), gridEnd = new Date(year, month + 1, trail);
-  const days = await api(`/api/v1/calendar?start=${localDate(gridStart)}&end=${localDate(gridEnd)}`);
+  const range = calendarRange(localDate(gridStart), localDate(gridEnd));
+  const days = range ? await api(`/api/v1/calendar?${range}`) : {};
   let total = 0, green = 0, red = 0, scratch = 0;
   for (let day = 1; day <= last.getDate(); day++) {
     const item = days[localDate(new Date(year, month, day))], net = item?.net || 0;
@@ -165,8 +178,8 @@ async function calendar() {
   }
   let html = `<style>.day-grid{grid-template-columns:repeat(7,minmax(0,1fr)) minmax(135px,.8fr)}.week-total{min-height:82px;padding:10px;border:1px solid #30363d;border-radius:5px;background:#161b22;display:flex;flex-direction:column;justify-content:center}.week-total strong{font-size:17px}@media(max-width:850px){.day-grid{overflow-x:auto;grid-template-columns:repeat(7,minmax(105px,1fr)) minmax(135px,.8fr)}}</style><div class="toolbar"><button onclick="changeMonth(-1)">←</button><button onclick="calendarMonth=new Date();render()">Today</button><h2>${first.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h2><button onclick="changeMonth(1)">→</button></div><div class="day-grid">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Week P&L'].map(day => `<b>${day}</b>`).join('')}`;
   for (let date = new Date(gridStart); date <= gridEnd; date.setDate(date.getDate() + 1)) {
-    const key = localDate(date), inMonth = date.getMonth() === month, item = days[key], net = item?.net || 0;
-    html += inMonth ? `<div class="day clickable ${net > 10000 ? 'positive' : net < -10000 ? 'negative' : 'scratch'}" onclick="showDay('${key}')"><b>${date.getDate()}</b>${item ? `<br>${money(net)}<br><small>${item.trades} trades</small>` : ''}</div>` : '<div></div>';
+    const key = localDate(date), inMonth = date.getMonth() === month, included = dateIsInRange(key), item = days[key], net = item?.net || 0;
+    html += inMonth ? `<div class="day ${included ? `clickable ${net > 10000 ? 'positive' : net < -10000 ? 'negative' : 'scratch'}` : 'filtered-out'}"${included ? ` onclick="showDay('${key}')"` : ''}><b>${date.getDate()}</b>${item ? `<br>${money(net)}<br><small>${item.trades} trades</small>` : ''}</div>` : '<div></div>';
     if (date.getDay() === 6) {
       const weekStart = new Date(date); weekStart.setDate(date.getDate() - 6);
       let weekNet = 0, weekTrades = 0;
@@ -178,7 +191,8 @@ async function calendar() {
       html += `<div class="week-total"><span class="muted">${weekStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span><strong class="${weekNet >= 0 ? 'green' : 'red'}">${money(weekNet)}</strong><small>${weekTrades} trades</small></div>`;
     }
   }
-  return `<div class="cards">${metric(`${first.toLocaleString(undefined, { month: 'long' })} P&L`, money(total), total >= 0 ? 'green' : 'red')}${metric('Trading days', green + red + scratch)}${metric('Green / red / scratch', `${green} / ${red} / ${scratch}`)}</div>${html}</div><p class="muted">Weekly P&L uses complete Sunday–Saturday calendar weeks; boundary weeks can include adjacent-month trading days.</p>`;
+  const rangeNote = dateStart || dateEnd ? 'Calendar totals and day drill-downs respect the selected date range.' : 'Weekly P&L uses complete Sunday–Saturday calendar weeks; boundary weeks can include adjacent-month trading days.';
+  return `${filters()}<div class="cards">${metric(`${first.toLocaleString(undefined, { month: 'long' })} P&L`, money(total), total >= 0 ? 'green' : 'red')}${metric('Trading days', green + red + scratch)}${metric('Green / red / scratch', `${green} / ${red} / ${scratch}`)}</div>${html}</div><p class="muted">${rangeNote}</p>`;
 }
 function changeMonth(amount) { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + amount, 1); render(); }
 function showDay(day) { navigate(`day/${day}`); }
@@ -189,7 +203,7 @@ async function dayDetail() {
     api(`/api/v1/analytics/summary?${range}`), api(`/api/v1/analytics/equity?${range}`),
     api(`/api/v1/analytics/equity?${range}&series=drawdown`)
   ]);
-  setTimeout(() => drawEquity(equity, drawdown, '#day-equity-chart'), 0);
+  setTimeout(() => drawEquity(equity, drawdown, '#day-equity-chart', true), 0);
   const excursionRatio = summary.average_mae && summary.average_mfe != null ? summary.average_mfe / Math.abs(summary.average_mae) : null;
   const totalCosts = summary.commissions + summary.fees;
   const titleDate = new Date(`${selectedDay}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
