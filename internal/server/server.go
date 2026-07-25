@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"path"
 	"slices"
@@ -72,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("/api/v1/tags/", s.tag)
 	m.HandleFunc("/api/v1/analytics/summary", s.summary)
 	m.HandleFunc("/api/v1/analytics/equity", s.equity)
+	m.HandleFunc("/api/v1/analytics/risk", s.riskAnalytics)
 	m.HandleFunc("/api/v1/analytics/breakdowns", s.breakdowns)
 	m.HandleFunc("/api/v1/calendar", s.calendar)
 	m.HandleFunc("/api/v1/day-notes/", s.dayNote)
@@ -475,7 +477,9 @@ func (s *Server) trade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, _ := s.store.Excursion(r.Context(), id)
-	jsonOut(w, map[string]any{"trade": t, "executions": xs, "excursion": x, "massive_status": map[bool]string{true: "configured", false: "Massive API key not configured"}[s.cfg.Massive.APIKey != ""]})
+	loc, _ := time.LoadLocation(s.cfg.App.Timezone)
+	tradingDay := time.UnixMicro(t.ExitAt).In(loc).Format("2006-01-02")
+	jsonOut(w, map[string]any{"trade": t, "executions": xs, "excursion": x, "trading_day": tradingDay, "massive_status": map[bool]string{true: "configured", false: "Massive API key not configured"}[s.cfg.Massive.APIKey != ""]})
 }
 func (s *Server) bulkTradeTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1145,6 +1149,103 @@ func (s *Server) equity(w http.ResponseWriter, r *http.Request) {
 		x = append(x, map[string]any{"time": ts[i].ExitAt / 1_000_000, "value": value})
 	}
 	jsonOut(w, x)
+}
+
+type riskPoint struct {
+	Time       int64   `json:"time"`
+	Expectancy float64 `json:"expectancy"`
+	Volatility float64 `json:"volatility"`
+}
+
+type riskAnalytics struct {
+	AverageDrawdown       float64     `json:"average_drawdown"`
+	BiggestDrawdown       float64     `json:"biggest_drawdown"`
+	AverageDrawdownDays   float64     `json:"average_drawdown_days"`
+	AverageDrawdownTrades float64     `json:"average_drawdown_trades"`
+	CurrentDrawdown       float64     `json:"current_drawdown"`
+	CurrentDrawdownDays   float64     `json:"current_drawdown_days"`
+	CurrentDrawdownTrades int         `json:"current_drawdown_trades"`
+	Episodes              int         `json:"episodes"`
+	Window                int         `json:"window"`
+	Rolling               []riskPoint `json:"rolling"`
+}
+
+func (s *Server) riskAnalytics(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.filteredTrades(r)
+	if err != nil {
+		bad(w, "invalid_filter", err.Error(), http.StatusBadRequest)
+		return
+	}
+	const window = 20
+	out := riskAnalytics{Window: window, Rolling: []riskPoint{}}
+	var equity, highWater int64
+	var episodeStart time.Time
+	var episodeDepth int64
+	var episodeTrades int
+	var depthTotal int64
+	var daysTotal float64
+	var tradesTotal int
+	values := make([]float64, 0, len(ts))
+	closeEpisode := func(at time.Time) {
+		if episodeTrades == 0 {
+			return
+		}
+		out.Episodes++
+		depthTotal += episodeDepth
+		daysTotal += at.Sub(episodeStart).Hours() / 24
+		tradesTotal += episodeTrades
+		episodeStart, episodeDepth, episodeTrades = time.Time{}, 0, 0
+	}
+	for i := len(ts) - 1; i >= 0; i-- {
+		trade := ts[i]
+		net := float64(trade.Net) / float64(positions.Scale)
+		values = append(values, net)
+		equity += trade.Net
+		at := time.UnixMicro(trade.ExitAt)
+		if equity >= highWater {
+			closeEpisode(at)
+			highWater = equity
+		} else {
+			if episodeTrades == 0 {
+				episodeStart = at
+			}
+			episodeTrades++
+			depth := highWater - equity
+			if depth > episodeDepth {
+				episodeDepth = depth
+			}
+			if float64(depth)/float64(positions.Scale) > out.BiggestDrawdown {
+				out.BiggestDrawdown = float64(depth) / float64(positions.Scale)
+			}
+		}
+		if len(values) >= window {
+			sample := values[len(values)-window:]
+			var total float64
+			for _, value := range sample {
+				total += value
+			}
+			mean := total / window
+			var squares float64
+			for _, value := range sample {
+				delta := value - mean
+				squares += delta * delta
+			}
+			out.Rolling = append(out.Rolling, riskPoint{Time: trade.ExitAt / 1_000_000, Expectancy: mean, Volatility: math.Sqrt(squares / float64(window-1))})
+		}
+	}
+	if episodeTrades > 0 {
+		last := time.UnixMicro(ts[0].ExitAt)
+		out.CurrentDrawdown = float64(highWater-equity) / float64(positions.Scale)
+		out.CurrentDrawdownDays = last.Sub(episodeStart).Hours() / 24
+		out.CurrentDrawdownTrades = episodeTrades
+		closeEpisode(last)
+	}
+	if out.Episodes > 0 {
+		out.AverageDrawdown = float64(depthTotal) / float64(positions.Scale) / float64(out.Episodes)
+		out.AverageDrawdownDays = daysTotal / float64(out.Episodes)
+		out.AverageDrawdownTrades = float64(tradesTotal) / float64(out.Episodes)
+	}
+	jsonOut(w, out)
 }
 
 type breakdown struct {

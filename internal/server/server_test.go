@@ -172,6 +172,43 @@ func TestEquityStartsAtZeroAtTheFirstTradeEntry(t *testing.T) {
 	}
 }
 
+func TestRiskAnalyticsMeasuresDrawdownEpisodes(t *testing.T) {
+	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	rows := []positions.Execution{
+		{Account: "a", Symbol: "ONE", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "ONE", Action: "sell", Quantity: 1, Price: 11 * positions.Scale, At: at.Add(time.Minute), Row: 2},
+		{Account: "a", Symbol: "TWO", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at.Add(time.Hour), Row: 3},
+		{Account: "a", Symbol: "TWO", Action: "sell", Quantity: 1, Price: 9_500_000, At: at.Add(time.Hour + time.Minute), Row: 4},
+		{Account: "a", Symbol: "THREE", Action: "buy", Quantity: 1, Price: 10 * positions.Scale, At: at.Add(2 * time.Hour), Row: 5},
+		{Account: "a", Symbol: "THREE", Action: "sell", Quantity: 1, Price: 11 * positions.Scale, At: at.Add(2*time.Hour + time.Minute), Row: 6},
+	}
+	if _, _, err = st.Commit(context.Background(), "risk", "risk.csv", rows, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	New(config.Defaults(), st).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/analytics/risk", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		AverageDrawdown float64 `json:"average_drawdown"`
+		BiggestDrawdown float64 `json:"biggest_drawdown"`
+		CurrentDrawdown float64 `json:"current_drawdown"`
+		Episodes        int     `json:"episodes"`
+	}
+	if err = json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Episodes != 1 || got.AverageDrawdown != .5 || got.BiggestDrawdown != .5 || got.CurrentDrawdown != 0 {
+		t.Fatalf("unexpected risk analytics: %#v", got)
+	}
+}
+
 func TestCalendarSharesTheDateFilteredPopulation(t *testing.T) {
 	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
 	if err != nil {

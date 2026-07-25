@@ -30,6 +30,20 @@ async function evaluate(expression) {
 }
 
 await new Promise(resolve => setTimeout(resolve, 1500));
+if (process.argv[2] === 'chart-clarity') {
+  await evaluate(`showTrade(629)`);
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  const oneMinute = await evaluate(`({canvas: Boolean(document.querySelector('#chart canvas')), preset: candleChartPreset, help: document.querySelector('.chart-help')?.textContent, fatal: document.querySelector('#app > .panel.red')?.textContent || ''})`);
+  await evaluate(`loadChart(629, '5m')`);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  const fiveMinute = await evaluate(`({canvas: Boolean(document.querySelector('#chart canvas')), timeframe: activeChartTimeframe, fatal: document.querySelector('#app > .panel.red')?.textContent || ''})`);
+  await evaluate(`loadChart(629, '1m', 'full')`);
+  await new Promise(resolve => setTimeout(resolve, 2500));
+  const fullSession = await evaluate(`({canvas: Boolean(document.querySelector('#chart canvas')), mode: activeChartMode, fatal: document.querySelector('#app > .panel.red')?.textContent || ''})`);
+  console.log(JSON.stringify({ oneMinute, fiveMinute, fullSession }, null, 2));
+  socket.close();
+  process.exit(0);
+}
 if (process.argv[2] === 'day') {
   await evaluate(`showDay('2026-07-21')`);
   await new Promise(resolve => setTimeout(resolve, 2500));

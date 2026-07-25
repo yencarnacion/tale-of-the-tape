@@ -4,6 +4,9 @@ const dt = value => new Date(typeof value === 'string' ? value : value / 1000).t
 const esc = value => String(value ?? '').replace(/[&<>]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char]);
 let view = 'dashboard', selected = null, selectedDay = '', tradePage = 0, tradeSort = 'exit_at', tradeDescending = true;
 let dateStart = '', dateEnd = '', datePreset = '', calendarMonth = new Date();
+let cohortSymbol = '', cohortDirection = '', cohortOutcome = '', cohortHolding = '';
+let executionChartMode = 'both';
+let candleChartPreset = localStorage.getItem('tale-candle-preset') || 'executions', activeChartTimeframe = '1m', activeChartMode = 'focus';
 let indicatorState = JSON.parse(localStorage.getItem('tale-indicators') || '{"vwap":true,"sma9":true,"sma20":true,"ema9":true,"ema20":true,"bollinger":true,"volume":true}');
 
 async function api(url, options) {
@@ -16,12 +19,25 @@ function query(extra = '') {
   const parts = [];
   if (dateStart) parts.push(`start=${encodeURIComponent(dateStart)}`);
   if (dateEnd) parts.push(`end=${encodeURIComponent(dateEnd)}`);
+  if (cohortSymbol) parts.push(`symbol=${encodeURIComponent(cohortSymbol)}`);
+  if (cohortDirection) parts.push(`direction=${encodeURIComponent(cohortDirection)}`);
+  if (cohortOutcome) parts.push(`outcome=${encodeURIComponent(cohortOutcome)}`);
+  if (cohortHolding) parts.push(`holding_time=${encodeURIComponent(cohortHolding)}`);
   if (extra) parts.push(extra);
   return parts.length ? `?${parts.join('&')}` : '';
 }
 function filters() {
   const label = dateStart && dateEnd ? `Showing ${datePreset === 'week' ? 'this week' : datePreset === 'month' ? 'month to date' : datePreset === 'year' ? 'year to date' : 'custom range'}: ${dateStart} through ${dateEnd}` : 'Showing all imported dates';
-  return `<section class="range-filter"><div class="toolbar"><button class="${datePreset === 'week' ? 'active' : ''}" onclick="setDatePreset('week')">This week</button><button class="${datePreset === 'month' ? 'active' : ''}" onclick="setDatePreset('month')">Month to date</button><button class="${datePreset === 'year' ? 'active' : ''}" onclick="setDatePreset('year')">Year to date</button><label>Start <input id="start" type="date" value="${dateStart}"></label><label>End <input id="end" type="date" value="${dateEnd}"></label><button onclick="applyDates()">Apply</button><button class="${!dateStart && !dateEnd ? 'active' : ''}" onclick="clearDates()">All dates</button>${dateStart && dateEnd ? '<button onclick="enrichRange()">Calculate range MFE / MAE</button>' : ''}</div><p><strong>${label}</strong></p></section>`;
+  const holdLabels = { under_5m: 'under 5m', '5_30m': '5–30m', '30_60m': '30–60m', '60m_plus': '60m+' };
+  const cohort = [cohortSymbol && cohortSymbol.toUpperCase(), cohortDirection, cohortOutcome, holdLabels[cohortHolding]].filter(Boolean).join(' · ');
+  return `<section class="range-filter"><div class="toolbar"><button class="${datePreset === 'week' ? 'active' : ''}" onclick="setDatePreset('week')">This week</button><button class="${datePreset === 'month' ? 'active' : ''}" onclick="setDatePreset('month')">Month to date</button><button class="${datePreset === 'year' ? 'active' : ''}" onclick="setDatePreset('year')">Year to date</button><label>Start <input id="start" type="date" value="${dateStart}"></label><label>End <input id="end" type="date" value="${dateEnd}"></label><button onclick="applyDates()">Apply</button><button class="${!dateStart && !dateEnd ? 'active' : ''}" onclick="clearDates()">All dates</button>${dateStart && dateEnd ? '<button onclick="enrichRange()">Calculate range MFE / MAE</button>' : ''}</div>
+    <details class="cohort-filter" ${cohort ? 'open' : ''}><summary>Trade cohort filters${cohort ? ` · ${esc(cohort)}` : ''}</summary><div class="toolbar">
+      <label>Symbol <input id="cohort-symbol" value="${esc(cohortSymbol)}" placeholder="e.g. NVDA"></label>
+      <label>Side <select id="cohort-direction"><option value="">All</option><option value="long" ${cohortDirection === 'long' ? 'selected' : ''}>Long</option><option value="short" ${cohortDirection === 'short' ? 'selected' : ''}>Short</option></select></label>
+      <label>Outcome <select id="cohort-outcome"><option value="">All</option><option value="win" ${cohortOutcome === 'win' ? 'selected' : ''}>Winners</option><option value="loss" ${cohortOutcome === 'loss' ? 'selected' : ''}>Losers</option><option value="scratch" ${cohortOutcome === 'scratch' ? 'selected' : ''}>Scratches</option></select></label>
+      <label>Hold <select id="cohort-holding"><option value="">All</option><option value="under_5m" ${cohortHolding === 'under_5m' ? 'selected' : ''}>Under 5m</option><option value="5_30m" ${cohortHolding === '5_30m' ? 'selected' : ''}>5–30m</option><option value="30_60m" ${cohortHolding === '30_60m' ? 'selected' : ''}>30–60m</option><option value="60m_plus" ${cohortHolding === '60m_plus' ? 'selected' : ''}>60m+</option></select></label>
+      <button onclick="applyCohort()">Analyze cohort</button><button onclick="clearCohort()">Clear cohort</button>
+    </div></details><p><strong>${label}</strong>${cohort ? ` · Cohort: ${esc(cohort)}` : ''}</p></section>`;
 }
 const localDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const clockTime = time => new Date(Number(time) * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -36,6 +52,16 @@ function setDatePreset(period) {
 }
 function applyDates() { dateStart = $('#start').value; dateEnd = $('#end').value; datePreset = ''; localStorage.setItem('tale-date-range', JSON.stringify({ start: dateStart, end: dateEnd, preset: '' })); render(); }
 function clearDates() { dateStart = ''; dateEnd = ''; datePreset = ''; localStorage.removeItem('tale-date-range'); render(); }
+function applyCohort() {
+  cohortSymbol = $('#cohort-symbol').value.trim(); cohortDirection = $('#cohort-direction').value;
+  cohortOutcome = $('#cohort-outcome').value; cohortHolding = $('#cohort-holding').value;
+  localStorage.setItem('tale-cohort', JSON.stringify({ symbol: cohortSymbol, direction: cohortDirection, outcome: cohortOutcome, holding: cohortHolding }));
+  tradePage = 0; render();
+}
+function clearCohort() {
+  cohortSymbol = ''; cohortDirection = ''; cohortOutcome = ''; cohortHolding = '';
+  localStorage.removeItem('tale-cohort'); tradePage = 0; render();
+}
 function dateIsInRange(date) { return (!dateStart || date >= dateStart) && (!dateEnd || date <= dateEnd); }
 function calendarRange(start, end) {
   const from = dateStart && dateStart > start ? dateStart : start;
@@ -62,12 +88,48 @@ function patterns(items, title) {
   if (!items?.length) return '';
   return `<section class="panel"><h3>${title}</h3><table><thead><tr><th>Pattern</th><th>Trades</th><th>Win rate</th><th>Net P&L</th><th>Avg P&L</th><th>Avg MFE</th><th>Avg MAE</th></tr></thead><tbody>${items.map(item => `<tr><td>${esc(item.name)}</td><td>${item.summary.total_trades}</td><td>${percent(item.summary.win_rate)}</td><td class="${item.summary.net_pnl >= 0 ? 'green' : 'red'}">${money(item.summary.net_pnl * 1e6)}</td><td>${money(item.summary.average_trade * 1e6)}</td><td>${item.summary.average_mfe == null ? '—' : money(item.summary.average_mfe * 1e6)}</td><td>${item.summary.average_mae == null ? '—' : money(item.summary.average_mae * 1e6)}</td></tr>`).join('')}</tbody></table></section>`;
 }
+function orderedBreakdown(items, order = []) {
+  const rank = new Map(order.map((name, index) => [name, index]));
+  return [...(items || [])].sort((a, b) => (rank.get(a.name) ?? 999) - (rank.get(b.name) ?? 999) || a.name.localeCompare(b.name));
+}
+function edgeBars(items, title, note, order = []) {
+  items = orderedBreakdown(items, order);
+  if (!items.length) return '';
+  const max = Math.max(...items.map(item => Math.abs(item.summary.net_pnl)), 1);
+  return `<section class="panel edge-panel"><h3>${title}</h3><p class="muted">${note}</p><div class="edge-bars">${items.map(item => {
+    const net = item.summary.net_pnl, width = Math.max(2, Math.abs(net) / max * 100);
+    return `<div class="edge-row"><div class="edge-label"><strong>${esc(item.name)}</strong><span>${item.summary.total_trades} trades · ${percent(item.summary.win_rate)}</span></div><div class="edge-track"><span class="${net >= 0 ? 'edge-positive' : 'edge-negative'}" style="width:${width}%"></span></div><strong class="${net >= 0 ? 'green' : 'red'}">${money(net * 1e6)}</strong></div>`;
+  }).join('')}</div></section>`;
+}
+function dayPerformance(calendar) {
+  const days = Object.values(calendar || {}).sort((a, b) => a.date.localeCompare(b.date));
+  const values = days.map(day => ({ ...day, dollars: day.net / 1e6 }));
+  const green = values.filter(day => day.dollars > 0), red = values.filter(day => day.dollars < 0);
+  const flat = values.length - green.length - red.length;
+  const best = values.length ? values.reduce((a, b) => b.dollars > a.dollars ? b : a) : null;
+  const worst = values.length ? values.reduce((a, b) => b.dollars < a.dollars ? b : a) : null;
+  const average = items => items.length ? items.reduce((sum, day) => sum + day.dollars, 0) / items.length : null;
+  const months = new Map();
+  values.forEach(day => months.set(day.date.slice(0, 7), (months.get(day.date.slice(0, 7)) || 0) + day.dollars));
+  const monthly = [...months].map(([month, dollars]) => ({ month, dollars }));
+  const bestMonth = monthly.length ? monthly.reduce((a, b) => b.dollars > a.dollars ? b : a) : null;
+  const worstMonth = monthly.length ? monthly.reduce((a, b) => b.dollars < a.dollars ? b : a) : null;
+  return { values, green, red, flat, best, worst, averageGreen: average(green), averageRed: average(red), bestMonth, worstMonth, averageMonth: monthly.length ? monthly.reduce((sum, month) => sum + month.dollars, 0) / monthly.length : null };
+}
+function datedMoney(item, key = 'date') {
+  if (!item) return 'N/A';
+  const label = key === 'month'
+    ? new Date(`${item.month}-01T12:00:00`).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+    : new Date(`${item.date}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${money(item.dollars * 1e6)} <small>${label}</small>`;
+}
 
 async function dashboard() {
-  const [summary, equity, breakdown, drawdown] = await Promise.all([
-    api('/api/v1/analytics/summary' + query()), api('/api/v1/analytics/equity' + query()), api('/api/v1/analytics/breakdowns' + query()), api('/api/v1/analytics/equity' + query('series=drawdown'))
+  const [summary, equity, breakdown, drawdown, calendar, risk] = await Promise.all([
+    api('/api/v1/analytics/summary' + query()), api('/api/v1/analytics/equity' + query()), api('/api/v1/analytics/breakdowns' + query()), api('/api/v1/analytics/equity' + query('series=drawdown')), api('/api/v1/calendar' + query()), api('/api/v1/analytics/risk' + query())
   ]);
-  setTimeout(() => drawEquity(equity, drawdown), 0);
+  const days = dayPerformance(calendar);
+  setTimeout(() => { drawEquity(equity, drawdown); drawDailyPnL(days.values); drawRollingRisk(risk); }, 0);
   const broker = summary.broker_ytd == null || (datePreset && datePreset !== 'year') ? '' : `<section class="panel"><h3>Broker year-to-date reconciliation</h3><p><strong class="${summary.broker_ytd >= 0 ? 'green' : 'red'}">${money(summary.broker_ytd * 1e6)}</strong> through ${esc(summary.broker_ytd_date)} · Thinkorswim statement P/L YTD</p><p class="muted">Closed intraday journal P&L below is reconstructed from imported executions. Broker YTD includes carried-position cost basis that execution-only exports cannot reproduce exactly. Broker-reported commissions and fees YTD: ${money(summary.broker_fees_ytd * 1e6)}.</p></section>`;
   const kelly = (value, preliminary) => value == null ? 'Undefined' : `${percent(value)}${preliminary ? ` prelim · ${summary.kelly_sample}/${summary.kelly_minimum_sample}` : ''}`;
   const preliminaryKelly = summary.raw_kelly == null;
@@ -76,6 +138,11 @@ async function dashboard() {
     ['Average Daily Gain/Loss', money(summary.average_daily_pnl * 1e6)], ['Average Daily Volume', Math.round(summary.average_daily_volume || 0).toLocaleString()], ['Average Per-share Gain/Loss', summary.average_per_share == null ? 'N/A' : money(summary.average_per_share * 1e6)],
     ['Average Trade Gain/Loss', money(summary.average_trade * 1e6)], ['Average Winning Trade', money(summary.average_winner * 1e6)], ['Average Losing Trade', money(summary.average_loser * 1e6)],
     ['Total Number of Trades', summary.total_trades], ['Number of Winning Trades', countRate(summary.wins, summary.total_trades)], ['Number of Losing Trades', countRate(summary.losses, summary.total_trades)],
+    ['Total Trading Days', days.values.length], ['Winning Days', countRate(days.green.length, days.values.length)], ['Losing Days', countRate(days.red.length, days.values.length)],
+    ['Breakeven Days', countRate(days.flat, days.values.length)], ['Average Winning Day', days.averageGreen == null ? 'N/A' : money(days.averageGreen * 1e6)], ['Average Losing Day', days.averageRed == null ? 'N/A' : money(days.averageRed * 1e6)],
+    ['Best Day', datedMoney(days.best)], ['Worst Day', datedMoney(days.worst)], ['Max Consecutive Green Days', summary.max_green_day_streak],
+    ['Max Consecutive Red Days', summary.max_red_day_streak], ['Best Month', datedMoney(days.bestMonth, 'month')], ['Worst Month', datedMoney(days.worstMonth, 'month')],
+    ['Average Monthly P&L', days.averageMonth == null ? 'N/A' : money(days.averageMonth * 1e6)],
     ['Average Hold Time (scratch trades)', duration(summary.average_scratch_hold_minutes)], ['Average Hold Time (winning trades)', duration(summary.average_winning_hold_minutes)], ['Average Hold Time (losing trades)', duration(summary.average_losing_hold_minutes)],
     ['Number of Scratch Trades', countRate(summary.scratches, summary.total_trades)], ['Max Consecutive Wins', summary.max_win_streak], ['Max Consecutive Losses', summary.max_loss_streak],
     ['Trade P&L Standard Deviation', summary.trade_pnl_standard_deviation == null ? 'N/A' : money(summary.trade_pnl_standard_deviation * 1e6)], ['System Quality Number (SQN)', decimal(summary.system_quality_number)], ['Probability of Random Chance', percent(summary.probability_random_chance)],
@@ -88,7 +155,21 @@ async function dashboard() {
     metric('Trades', summary.total_trades), metric('Avg winner', money(summary.average_winner * 1e6), 'green'), metric('Avg loser', money(summary.average_loser * 1e6), 'red'),
     metric('Profit factor', summary.profit_factor ? summary.profit_factor.toFixed(2) : 'N/A'), metric('Expectancy', money(summary.expectancy * 1e6)),
     metric('Raw Kelly', kelly(summary.raw_kelly ?? summary.preliminary_raw_kelly, preliminaryKelly)), metric('Half Kelly', kelly(summary.half_kelly ?? summary.preliminary_half_kelly, preliminaryKelly)), metric('Max drawdown', money(summary.max_drawdown * 1e6), 'red'), metric('Avg MFE', summary.average_mfe == null ? 'N/A' : money(summary.average_mfe * 1e6), 'green'), metric('Avg MAE', summary.average_mae == null ? 'N/A' : money(summary.average_mae * 1e6), 'red'), metric('Max win streak', summary.max_win_streak), metric('Max loss streak', summary.max_loss_streak)
-  ].join('')}</div><section class="panel"><h2>Detailed statistics</h2><table><tbody>${detailed.map(([name, value]) => `<tr><th>${name}</th><td>${value}</td></tr>`).join('')}</tbody></table><p class="muted">SQN requires at least 30 trades. Probability of random chance is the exact two-sided binomial probability for the observed win/loss split. Volume counts shares opened per completed round trip.</p></section><section class="panel"><h2>Closed-trade equity & drawdown</h2><div id="equity-chart" class="small-chart"></div></section>${patterns(breakdown.tag, 'Performance by tag')}${patterns(breakdown.symbol, 'Performance by symbol')}<section class="panel"><h2>Review, not execution</h2><p class="muted">Metrics use net P&L after commissions and fees. Kelly is analytical only and highly sample-sensitive.</p></section>`;
+  ].join('')}</div><section class="chart-grid"><div class="panel"><h2>Cumulative P&L & drawdown</h2><div id="equity-chart" class="small-chart"></div><p class="muted">Shows whether your edge is compounding and how deep the current equity decline is.</p></div><div class="panel"><h2>Net P&L by trading day</h2><div id="daily-pnl-chart" class="small-chart"></div><p class="muted">Use the distribution of green and red sessions to spot outsized loss days and inconsistent risk.</p></div></section>
+    <h2 class="section-title">Where your edge works</h2><section class="edge-grid">
+      ${edgeBars(breakdown.entry_time, 'Performance by entry time', 'Net P&L for trades grouped by entry half-hour. Look for time windows to stop trading or size down.')}
+      ${edgeBars(breakdown.weekday, 'Performance by weekday', 'Separates a recurring weekday effect from one unusually good or bad session.', ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])}
+      ${edgeBars(breakdown.holding_time, 'Performance by hold time', 'Shows whether quick decisions or extended holds produce the stronger realized edge.', ['under 5m', '5–30m', '30–60m', '60m+'])}
+    </section>
+    <h2 class="section-title">Risk regime</h2><div class="cards risk-cards">
+      ${metric('Current drawdown', money(risk.current_drawdown * 1e6), risk.current_drawdown ? 'red' : 'green')}
+      ${metric('Current drawdown length', `${risk.current_drawdown_trades} trades · ${decimal(risk.current_drawdown_days, 1)}d`)}
+      ${metric('Average drawdown', money(risk.average_drawdown * 1e6), 'red')}
+      ${metric('Worst drawdown', money(risk.biggest_drawdown * 1e6), 'red')}
+      ${metric('Avg recovery length', `${decimal(risk.average_drawdown_trades, 1)} trades · ${decimal(risk.average_drawdown_days, 1)}d`)}
+      ${metric('Drawdown episodes', risk.episodes)}
+    </div><section class="panel"><h3>Rolling 20-trade edge and volatility</h3><div id="rolling-risk-chart" class="small-chart"></div><p class="muted">Green is average net P&L per trade; amber is trade P&L standard deviation. Falling expectancy with rising volatility is a practical size-down signal—not a prediction.</p></section>
+    <section class="panel"><h2>Detailed statistics</h2><table><tbody>${detailed.map(([name, value]) => `<tr><th>${name}</th><td>${value}</td></tr>`).join('')}</tbody></table><p class="muted">Day and month statistics use realized net P&L on each trade's exit date. SQN requires at least 30 trades. Probability of random chance is the exact two-sided binomial probability for the observed win/loss split. Volume counts shares opened per completed round trip.</p></section>${patterns(breakdown.direction, 'Long vs short performance')}${patterns(breakdown.tag, 'Performance by tag')}${patterns(breakdown.symbol, 'Performance by symbol')}<section class="panel"><h2>Review, not execution</h2><p class="muted">Metrics use net P&L after commissions and fees. Treat small cohorts as hypotheses, not trading rules; compare both trade count and win rate before changing your plan.</p></section>`;
 }
 function drawEquity(points, drawdown, selector = '#equity-chart', intraday = false) {
   const el = $(selector);
@@ -101,6 +182,24 @@ function drawEquity(points, drawdown, selector = '#equity-chart', intraday = fal
   const chart = LightweightCharts.createChart(el, options);
   const line = chart.addSeries(LightweightCharts.LineSeries, { color: '#58a6ff', lineWidth: 2 });
   line.setData(points); if (drawdown?.length) { const risk = chart.addSeries(LightweightCharts.LineSeries, { color: '#f85149', lineWidth: 1, lastValueVisible: false }); risk.setData(drawdown); } chart.timeScale().fitContent();
+}
+function drawDailyPnL(days) {
+  const el = $('#daily-pnl-chart');
+  if (!el || !days?.length) { if (el) el.textContent = 'No closed trades in this range.'; return; }
+  const chart = LightweightCharts.createChart(el, { height: 220, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
+  const bars = chart.addSeries(LightweightCharts.HistogramSeries, { base: 0, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
+  bars.setData(days.map(day => ({ time: day.date, value: day.dollars, color: day.dollars > 0 ? '#3fb950' : day.dollars < 0 ? '#f85149' : '#8b949e' })));
+  chart.timeScale().fitContent();
+}
+function drawRollingRisk(risk) {
+  const el = $('#rolling-risk-chart'), points = risk?.rolling || [];
+  if (!el || !points.length) { if (el) el.textContent = `At least ${risk?.window || 20} trades are required.`; return; }
+  const chart = LightweightCharts.createChart(el, { height: 220, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
+  const edge = chart.addSeries(LightweightCharts.LineSeries, { color: '#3fb950', lineWidth: 2, title: 'Expectancy' });
+  const volatility = chart.addSeries(LightweightCharts.LineSeries, { color: '#f0b429', lineWidth: 1, title: 'Volatility' });
+  edge.setData(points.map(point => ({ time: point.time, value: point.expectancy })));
+  volatility.setData(points.map(point => ({ time: point.time, value: point.volatility })));
+  chart.timeScale().fitContent();
 }
 
 async function trades() {
@@ -131,19 +230,94 @@ function applyRoute() {
 function showTrade(id) { navigate(`trade/${id}`); }
 function indicatorControls() {
   const items = [['vwap', 'VWAP'], ['sma9', 'SMA 9'], ['sma20', 'SMA 20'], ['ema9', 'EMA 9'], ['ema20', 'EMA 20'], ['bollinger', 'Bollinger'], ['volume', 'Volume']];
-  return `<div class="indicator-controls">${items.map(([key, label]) => `<label><input type="checkbox" data-indicator="${key}" ${indicatorState[key] ? 'checked' : ''}> ${label}</label>`).join('')}</div>`;
+  return `<details class="indicator-settings"><summary>Custom indicators</summary><div class="indicator-controls">${items.map(([key, label]) => `<label><input type="checkbox" data-indicator="${key}" ${indicatorState[key] ? 'checked' : ''}> ${label}</label>`).join('')}</div></details>`;
+}
+function candlePresetControls() {
+  return `<div class="chart-mode candle-presets" role="group" aria-label="Candlestick chart detail"><button data-candle-preset="executions" class="${candleChartPreset === 'executions' ? 'active' : ''}" onclick="setCandleChartPreset('executions')">Executions</button><button data-candle-preset="context" class="${candleChartPreset === 'context' ? 'active' : ''}" onclick="setCandleChartPreset('context')">Trade context</button><button data-candle-preset="custom" class="${candleChartPreset === 'custom' ? 'active' : ''}" onclick="setCandleChartPreset('custom')">Custom</button></div>`;
+}
+function executionPath(executions, maxPosition = 0) {
+  let position = 0, basis = 0, realized = 0, costs = 0, lastTime = 0;
+  return executions.map((execution, index) => {
+    const quantity = Number(execution.quantity || 0), price = Number(execution.price || 0);
+    const signed = execution.action === 'buy' ? quantity : -quantity;
+    const previousPosition = position;
+    let change = !position ? 'OPEN' : Math.sign(position) === Math.sign(signed) ? 'ADD' : '';
+    if (!position || Math.sign(position) === Math.sign(signed)) {
+      basis = position ? (Math.abs(position) * basis + quantity * price) / (Math.abs(position) + quantity) : price;
+      position += signed;
+    } else {
+      const closing = Math.min(Math.abs(position), quantity);
+      realized += closing * (price - basis) * Math.sign(position);
+      const next = position + signed;
+      if (next && Math.sign(next) !== Math.sign(position)) basis = price;
+      if (!next) basis = 0;
+      position = next;
+    }
+    if (!change) change = !position ? 'EXIT' : Math.sign(position) === Math.sign(previousPosition) ? 'TRIM' : 'REVERSE';
+    costs += Number(execution.commission || 0) + Number(execution.fees || 0);
+    const rawTime = Math.floor(new Date(execution.at).getTime() / 1000);
+    const time = Math.max(rawTime, lastTime + (index ? 1 : 0)); lastTime = time;
+    const exposure = maxPosition ? Math.abs(position) / maxPosition : null;
+    return { ...execution, position, previousPosition, change, exposure, basis, realized, costs, net: realized - costs, time };
+  });
 }
 async function detail() {
   const [data, tagResponse] = await Promise.all([api(`/api/v1/trades/${selected}`), api('/api/v1/tags')]);
   const t = data.trade, tags = tagResponse || [], tradeTags = t.tags || [], executions = data.executions || [];
-  setTimeout(() => loadChart(t.id), 0);
+  const dayEquity = await api(`/api/v1/analytics/equity?start=${encodeURIComponent(data.trading_day)}&end=${encodeURIComponent(data.trading_day)}`);
+  const path = executionPath(executions, t.max_quantity);
+  setTimeout(() => { loadChart(t.id); drawExecutionPath(path, dayEquity); }, 0);
   const m = data.excursion_metrics || {}, ratio = value => value == null ? 'N/A' : `${(value * 100).toFixed(1)}%`;
-  return `<button onclick="view='trades';render()">← Trades</button><h2>${esc(t.symbol)} · ${t.direction} · <span class="${t.net >= 0 ? 'green' : 'red'}">${money(t.net)}</span></h2><section class="panel"><div class="toolbar"><button onclick="loadChart(${t.id}, '1m')">1 minute</button><button onclick="loadChart(${t.id}, '5m')">5 minute</button><button onclick="loadChart(${t.id}, '1m', 'full')">Full session</button><button onclick="enrich(${t.id})">Calculate MFE / MAE</button></div>${indicatorControls()}<div id="chart" class="chart"></div><p id="chart-status" class="muted">Loading chart…</p><small>TradingView Lightweight Charts™</small></section><div class="detail"><section class="panel"><h3>Executions</h3><table><tbody>${executions.map(e => `<tr><td>${dt(e.at)}</td><td>${e.action.toUpperCase()} ${e.quantity}</td><td>${money(e.price)}</td></tr>`).join('')}</tbody></table><p>Gross ${money(t.gross)} · Costs ${money(t.commissions + t.fees)} · Net ${money(t.net)}</p></section><section class="panel"><h3>Journal</h3><textarea id="note" placeholder="Private trade note">${esc(t.note)}</textarea><h4>Tags</h4><div class="tag-list">${tags.filter(tag => !tag.archived || tradeTags.some(current => current.id === tag.id)).map(tag => `<label class="tag"><input type="checkbox" value="${tag.id}" ${tradeTags.some(current => current.id === tag.id) ? 'checked' : ''}> <span style="background:${esc(tag.color)}"></span>${esc(tag.name)}</label>`).join('') || '<span class="muted">No tags yet.</span>'}</div><div class="toolbar"><input id="new-tag" placeholder="New tag name"><input id="new-tag-color" type="color" value="#58a6ff"><button onclick="createTag()">Create tag</button><button onclick="saveTrade(${t.id})">Save journal</button></div><p class="muted">MFE: ${data.excursion?.mfe == null ? 'Not calculated' : money(data.excursion.mfe)} · MAE: ${data.excursion?.mae == null ? 'Not calculated' : money(data.excursion.mae)}<br>MFE/share: ${m.mfe_per_share == null ? 'N/A' : money(m.mfe_per_share * 1e6)} · MAE/share: ${m.mae_per_share == null ? 'N/A' : money(m.mae_per_share * 1e6)} · Capture: ${ratio(m.capture_ratio)}</p><p class="muted">${esc(data.excursion?.source || '')} ${esc(data.excursion?.completeness || '')}<br>${esc(data.excursion?.warnings || data.massive_status)}</p></section></div>`;
+  return `<button onclick="view='trades';render()">← Trades</button><h2>${esc(t.symbol)} · ${t.direction} · <span class="${t.net >= 0 ? 'green' : 'red'}">${money(t.net)}</span></h2><section class="panel"><div class="toolbar"><button onclick="loadChart(${t.id}, '1m')">1 minute</button><button onclick="loadChart(${t.id}, '5m')">5 minute</button><button onclick="loadChart(${t.id}, '1m', 'full')">Full session</button><span class="toolbar-divider"></span>${candlePresetControls()}<button onclick="enrich(${t.id})">Calculate MFE / MAE</button></div>${indicatorControls()}<div id="chart" class="chart"></div><p id="chart-status" class="muted">Loading chart…</p><p class="muted chart-help">Execution markers are numbered to match the ledger. Fills in the same candle are combined into one label.</p><small>TradingView Lightweight Charts™</small></section>
+    <section class="panel"><div class="toolbar"><h3>Trade and session P&amp;L path</h3><div class="chart-mode" role="group" aria-label="P&L chart view"><button class="${executionChartMode === 'trade' ? 'active' : ''}" onclick="setExecutionChartMode('trade')">Trade</button><button class="${executionChartMode === 'both' ? 'active' : ''}" onclick="setExecutionChartMode('both')">Trade + session</button><button class="${executionChartMode === 'session' ? 'active' : ''}" onclick="setExecutionChartMode('session')">Session</button></div><span class="chart-key">${executionChartMode !== 'session' ? '<i class="trade-key"></i>Selected trade' : ''}${executionChartMode === 'both' ? ' <i class="day-key"></i>Closed-trade day P&amp;L' : ''}${executionChartMode === 'session' ? '<i class="day-key"></i>Closed-trade day P&amp;L' : ''}</span></div><div id="execution-path-chart" class="small-chart"></div><p class="muted">The axis is fitted to actual P&amp;L values; execution labels do not change its range. Blue reconstructs realized net P&amp;L after each fill. Gray is the session’s cumulative P&amp;L as completed trades close, using ${esc(data.trading_day)} in the configured trading timezone.</p></section>
+    <div class="detail"><section class="panel execution-ledger"><h3>Execution ledger</h3><table><thead><tr><th>#</th><th>Time</th><th>Decision</th><th>Fill</th><th>Price</th><th>Position after</th><th>Exposure</th><th>Realized net</th></tr></thead><tbody>${path.map((e, index) => `<tr><td><strong>${index + 1}</strong></td><td>${dt(e.at)}</td><td><span class="execution-type ${e.change.toLowerCase()}">${e.change}</span></td><td>${e.action.toUpperCase()} ${e.quantity}</td><td>${money(e.price)}</td><td>${Number(e.position).toLocaleString()}</td><td>${e.exposure == null ? '—' : percent(e.exposure)}</td><td class="${e.net >= 0 ? 'green' : 'red'}">${money(e.net)}</td></tr>`).join('')}</tbody></table><p>Gross ${money(t.gross)} · Costs ${money(t.commissions + t.fees)} · Net ${money(t.net)}</p></section><section class="panel"><div class="toolbar"><h3>Journal</h3><button onclick="insertTradeTemplate()">Insert review template</button></div><textarea id="note" placeholder="Private trade note">${esc(t.note)}</textarea><h4>Tags</h4><div class="tag-list">${tags.filter(tag => !tag.archived || tradeTags.some(current => current.id === tag.id)).map(tag => `<label class="tag"><input type="checkbox" value="${tag.id}" ${tradeTags.some(current => current.id === tag.id) ? 'checked' : ''}> <span style="background:${esc(tag.color)}"></span>${esc(tag.name)}</label>`).join('') || '<span class="muted">No tags yet.</span>'}</div><div class="toolbar"><input id="new-tag" placeholder="New tag name"><input id="new-tag-color" type="color" value="#58a6ff"><button onclick="createTag()">Create tag</button><button onclick="saveTrade(${t.id})">Save journal</button></div><p class="muted">MFE: ${data.excursion?.mfe == null ? 'Not calculated' : money(data.excursion.mfe)} · MAE: ${data.excursion?.mae == null ? 'N/A' : money(data.excursion.mae)}<br>MFE/share: ${m.mfe_per_share == null ? 'N/A' : money(m.mfe_per_share * 1e6)} · MAE/share: ${m.mae_per_share == null ? 'N/A' : money(m.mae_per_share * 1e6)} · Capture: ${ratio(m.capture_ratio)}</p><p class="muted">${esc(data.excursion?.source || '')} ${esc(data.excursion?.completeness || '')}<br>${esc(data.excursion?.warnings || data.massive_status)}</p></section></div>`;
+}
+function drawExecutionPath(path, dayEquity) {
+  const el = $('#execution-path-chart');
+  if (!el || !path.length) { if (el) el.textContent = 'No executions available.'; return; }
+  const tradeValues = path.map(point => point.net / 1e6);
+  const dayValues = (dayEquity || []).map(point => point.value);
+  const visibleValues = executionChartMode === 'trade' ? tradeValues : executionChartMode === 'session' ? dayValues : [...tradeValues, ...dayValues];
+  const low = Math.min(0, ...visibleValues), high = Math.max(0, ...visibleValues);
+  const span = Math.max(high - low, Math.abs(high), Math.abs(low), 1), padding = span * .12;
+  const fixedRange = { minValue: low - padding, maxValue: high + padding };
+  const fittedScale = { autoscaleInfoProvider: () => ({ priceRange: fixedRange }) };
+  const chart = LightweightCharts.createChart(el, { height: 250, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, rightPriceScale: { scaleMargins: { top: .06, bottom: .06 } }, localization: { timeFormatter: clockTime }, timeScale: { timeVisible: true, secondsVisible: true, tickMarkFormatter: clockTime }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
+  if (executionChartMode !== 'trade' && dayEquity?.length) {
+    const day = chart.addSeries(LightweightCharts.LineSeries, { ...fittedScale, color: '#8b949e', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, title: 'Day', lastValueVisible: true });
+    day.setData(dayEquity);
+  }
+  if (executionChartMode === 'session') { chart.timeScale().fitContent(); return; }
+  const line = chart.addSeries(LightweightCharts.LineSeries, { ...fittedScale, color: '#58a6ff', lineWidth: 2, priceLineVisible: true, title: 'Trade' });
+  line.setData(path.map((point, index) => ({ time: point.time, value: tradeValues[index] })));
+  const styles = {
+    OPEN: { color: '#58a6ff', shape: 'circle', position: 'aboveBar' },
+    ADD: { color: '#bc8cff', shape: 'arrowUp', position: 'aboveBar' },
+    TRIM: { color: '#f0b429', shape: 'arrowDown', position: 'belowBar' },
+    EXIT: { color: '#3fb950', shape: 'square', position: 'belowBar' },
+    REVERSE: { color: '#ff7b72', shape: 'square', position: 'aboveBar' }
+  };
+  LightweightCharts.createSeriesMarkers(line, path.map(point => {
+    const style = styles[point.change];
+    const exposure = point.exposure == null ? '' : ` · ${Math.round(point.exposure * 100)}%`;
+    return { time: point.time, ...style, text: `${point.change} ${point.quantity} → ${point.position > 0 ? '+' : ''}${point.position}${exposure}` };
+  }));
+  chart.timeScale().fitContent();
+}
+function setExecutionChartMode(mode) {
+  if (!['trade', 'both', 'session'].includes(mode)) return;
+  executionChartMode = mode;
+  render();
 }
 function bindIndicatorControls(id, timeframe, mode) {
-  document.querySelectorAll('[data-indicator]').forEach(input => input.onchange = () => { indicatorState[input.dataset.indicator] = input.checked; localStorage.setItem('tale-indicators', JSON.stringify(indicatorState)); loadChart(id, timeframe, mode); });
+  document.querySelectorAll('[data-indicator]').forEach(input => input.onchange = () => {
+    indicatorState[input.dataset.indicator] = input.checked; localStorage.setItem('tale-indicators', JSON.stringify(indicatorState));
+    candleChartPreset = 'custom'; localStorage.setItem('tale-candle-preset', candleChartPreset); updateCandlePresetButtons();
+    loadChart(id, timeframe, mode);
+  });
 }
 async function loadChart(id, timeframe = '1m', mode = 'focus') {
+  activeChartTimeframe = timeframe; activeChartMode = mode;
   const data = await api(`/api/v1/trades/${id}/chart?timeframe=${timeframe}${mode === 'full' ? '&view=full_session' : ''}`), el = $('#chart'), status = $('#chart-status');
   if (!el || !status) return;
   status.textContent = data.status + (data.source ? ` · ${data.source}` : ''); el.innerHTML = '';
@@ -152,17 +326,47 @@ async function loadChart(id, timeframe = '1m', mode = 'focus') {
   const chart = LightweightCharts.createChart(el, { height: 340, layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' }, localization: { timeFormatter: clockTime }, timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: clockTime }, grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } } });
   const candles = chart.addSeries(LightweightCharts.CandlestickSeries);
   candles.setData(data.bars.map(bar => ({ time: Math.floor(bar.time / 1000), open: bar.open, high: bar.high, low: bar.low, close: bar.close })));
-  const markers = (data.executions || []).map(e => ({ time: Math.floor(new Date(e.at).getTime() / 1000), position: e.action === 'buy' ? 'belowBar' : 'aboveBar', color: e.action === 'buy' ? '#3fb950' : '#f85149', shape: e.action === 'buy' ? 'arrowUp' : 'arrowDown', text: `${e.action.toUpperCase()} ${e.quantity} @ ${(e.price / 1e6).toFixed(2)}` }));
-  if (data.excursion?.mfe_at > 0) markers.push({ time: Math.floor(data.excursion.mfe_at / 1e6), position: 'aboveBar', color: '#f0b429', shape: 'circle', text: `MFE ${(data.excursion.mfe / 1e6).toFixed(2)}` });
-  if (data.excursion?.mae_at > 0) markers.push({ time: Math.floor(data.excursion.mae_at / 1e6), position: 'belowBar', color: '#ff7b72', shape: 'circle', text: `MAE ${(data.excursion.mae / 1e6).toFixed(2)}` });
+  const executionRows = executionPath(data.executions || []);
+  const seconds = timeframe === '5m' ? 300 : 60, grouped = new Map();
+  executionRows.forEach((execution, index) => {
+    const time = Math.floor(execution.time / seconds) * seconds;
+    if (!grouped.has(time)) grouped.set(time, []);
+    grouped.get(time).push({ ...execution, number: index + 1 });
+  });
+  const markerStyle = { OPEN: ['#58a6ff', 'circle'], ADD: ['#bc8cff', 'arrowUp'], TRIM: ['#f0b429', 'arrowDown'], EXIT: ['#3fb950', 'square'], REVERSE: ['#ff7b72', 'square'] };
+  const markers = [...grouped].map(([time, rows]) => {
+    const roles = [...new Set(rows.map(row => row.change))], first = rows[0], last = rows[rows.length - 1];
+    const number = rows.length === 1 ? `${first.number}` : `${first.number}–${last.number}`;
+    const [color, shape] = markerStyle[last.change];
+    return { time, position: last.action === 'buy' ? 'belowBar' : 'aboveBar', color, shape, text: `${number} ${roles.join('/')}` };
+  });
+  if (candleChartPreset !== 'executions' && data.excursion?.mfe_at > 0) markers.push({ time: Math.floor(data.excursion.mfe_at / 1e6 / seconds) * seconds, position: 'aboveBar', color: '#f0b429', shape: 'circle', text: 'MFE' });
+  if (candleChartPreset !== 'executions' && data.excursion?.mae_at > 0) markers.push({ time: Math.floor(data.excursion.mae_at / 1e6 / seconds) * seconds, position: 'belowBar', color: '#ff7b72', shape: 'circle', text: 'MAE' });
+  markers.sort((a, b) => a.time - b.time);
   LightweightCharts.createSeriesMarkers(candles, markers);
   const series = [['vwap', '#f0b429', 'vwap'], ['sma9', '#58a6ff', 'sma9'], ['sma20', '#bc8cff', 'sma20'], ['ema9', '#3fb950', 'ema9'], ['ema20', '#f85149', 'ema20'], ['upper', '#888', 'bollinger'], ['middle', '#666', 'bollinger'], ['lower', '#888', 'bollinger']];
-  for (const [name, color, toggle] of series) if (indicatorState[toggle] && data.indicators?.[name]?.length) { const line = chart.addSeries(LightweightCharts.LineSeries, { color, lineWidth: 1, lastValueVisible: false }); line.setData(data.indicators[name].map(point => ({ time: Math.floor(point.time / 1000), value: point.value }))); }
-  if (data.average_entry?.length) { const basis = chart.addSeries(LightweightCharts.LineSeries, { color: '#ffffff', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: false }); basis.setData(data.average_entry.map(point => ({ time: Math.floor(point.time / 1000), value: point.value }))); }
-  if (indicatorState.volume) { const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' }); volume.setData(data.bars.map(bar => ({ time: Math.floor(bar.time / 1000), value: bar.volume, color: '#388bfd88' }))); }
-  chart.timeScale().fitContent();
+  const enabled = toggle => candleChartPreset === 'context' ? toggle === 'vwap' : candleChartPreset === 'custom' && indicatorState[toggle];
+  for (const [name, color, toggle] of series) if (enabled(toggle) && data.indicators?.[name]?.length) { const line = chart.addSeries(LightweightCharts.LineSeries, { color, lineWidth: 1, lastValueVisible: false }); line.setData(data.indicators[name].map(point => ({ time: Math.floor(point.time / 1000), value: point.value }))); }
+  if (candleChartPreset !== 'executions' && data.average_entry?.length) { const basis = chart.addSeries(LightweightCharts.LineSeries, { color: '#ffffff', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: false }); basis.setData(data.average_entry.map(point => ({ time: Math.floor(point.time / 1000), value: point.value }))); }
+  if ((candleChartPreset === 'context' || candleChartPreset === 'custom' && indicatorState.volume)) { const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' }); volume.setData(data.bars.map(bar => ({ time: Math.floor(bar.time / 1000), value: bar.volume, color: '#388bfd66' }))); }
+  if (candleChartPreset === 'executions' && mode !== 'full' && grouped.size) {
+    const times = [...grouped.keys()], padding = Math.max(300, seconds * 2);
+    chart.timeScale().setVisibleRange({ from: times[0] - padding, to: times[times.length - 1] + padding });
+  } else {
+    chart.timeScale().fitContent();
+  }
+}
+function updateCandlePresetButtons() { document.querySelectorAll('[data-candle-preset]').forEach(button => button.classList.toggle('active', button.dataset.candlePreset === candleChartPreset)); }
+function setCandleChartPreset(preset) {
+  if (!['executions', 'context', 'custom'].includes(preset)) return;
+  candleChartPreset = preset; localStorage.setItem('tale-candle-preset', preset); updateCandlePresetButtons();
+  loadChart(selected, activeChartTimeframe, activeChartMode);
 }
 async function saveTrade(id) { const tagIds = [...document.querySelectorAll('.tag-list input:checked')].map(input => Number(input.value)); await api(`/api/v1/trades/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: $('#note').value, tag_ids: tagIds }) }); alert('Journal saved'); render(); }
+function insertTradeTemplate() {
+  const template = `Setup and market context:\n\nEntry trigger and invalidation:\n\nSize and risk decision:\n\nAdds / partials / trade management:\n\nExit quality and MFE capture:\n\nRule followed or broken:\n\nOne action to repeat or change:\n`;
+  if (!$('#note').value.trim() || confirm('Replace the current trade note with the review template?')) $('#note').value = template;
+}
 async function createTag() { const name = $('#new-tag').value.trim(); if (!name) return; await api('/api/v1/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color: $('#new-tag-color').value }) }); render(); }
 async function enrich(id) { try { const result = await api(`/api/v1/trades/${id}/enrich`, { method: 'POST' }); alert(`MFE ${money(result.mfe)} · MAE ${money(result.mae)} (${result.source}, ${result.completeness})`); render(); } catch (error) { alert(error.message); } }
 
@@ -257,6 +461,7 @@ async function render() {
 }
 document.querySelectorAll('nav button').forEach(button => button.onclick = () => navigate(button.dataset.view));
 try { const saved = JSON.parse(localStorage.getItem('tale-date-range') || '{}'); dateStart = saved.start || ''; dateEnd = saved.end || ''; datePreset = saved.preset || ''; } catch (_) {}
+try { const saved = JSON.parse(localStorage.getItem('tale-cohort') || '{}'); cohortSymbol = saved.symbol || ''; cohortDirection = saved.direction || ''; cohortOutcome = saved.outcome || ''; cohortHolding = saved.holding || ''; } catch (_) {}
 window.addEventListener('hashchange', () => { applyRoute(); render(); });
 applyRoute();
 render();
