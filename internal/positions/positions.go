@@ -19,6 +19,7 @@ type Execution struct {
 	Fees       int64     `json:"fees"`
 	At         time.Time `json:"at"`
 	Row        int       `json:"source_row"`
+	Occurrence int       `json:"-"`
 }
 type RoundTrip struct {
 	Account, Symbol, Direction    string

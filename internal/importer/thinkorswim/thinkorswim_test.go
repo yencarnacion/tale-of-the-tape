@@ -15,3 +15,11 @@ func TestParseCashStatement(t *testing.T) {
 		t.Fatalf("bad execution %#v", r.Executions[0])
 	}
 }
+
+func TestParseAssignsOccurrenceToSameSecondIdenticalFills(t *testing.T) {
+	data := []byte("Account Statement for ABC (Cash)\nDATE,TIME,TYPE,REF #,DESCRIPTION,Misc Fees,Commissions & Fees\n1/2/26,13:00:00,TRD,=\"1\",\"BOT +100 ABC @10.25\",,\n1/2/26,13:00:00,TRD,=\"2\",\"BOT +100 ABC @10.25\",,\n")
+	r := Parse(data, time.UTC)
+	if r.Accepted != 2 || r.Executions[0].Occurrence != 1 || r.Executions[1].Occurrence != 2 {
+		t.Fatalf("accepted=%d executions=%#v", r.Accepted, r.Executions)
+	}
+}

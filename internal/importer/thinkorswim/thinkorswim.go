@@ -47,6 +47,7 @@ func Parse(data []byte, loc *time.Location) Result {
 	header := map[string]int{}
 	row := 0
 	seen := map[string]bool{}
+	occurrences := map[string]int{}
 	for {
 		rec, err := r.Read()
 		if err == io.EOF {
@@ -119,6 +120,9 @@ func Parse(data []byte, loc *time.Location) Result {
 			fees = -fees
 		}
 		e := positions.Execution{Account: out.Account, Symbol: strings.ToUpper(symbol), Action: action, Quantity: abs(q), Price: price, Commission: comm, Fees: fees, At: stamp.UTC(), Row: row}
+		identity := fmt.Sprintf("%s|%s|%d|%d|%d", e.Symbol, e.Action, e.Quantity, e.Price, e.At.UnixMicro())
+		occurrences[identity]++
+		e.Occurrence = occurrences[identity]
 		out.Executions = append(out.Executions, e)
 		out.Accepted++
 		if !seen[e.Symbol] {

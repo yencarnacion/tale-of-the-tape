@@ -260,9 +260,11 @@ func (s *Store) Excursion(ctx context.Context, id int64) (Excursion, error) {
 }
 func scale(f float64) int64 { return int64(f*float64(positions.Scale) + .5) }
 func fingerprint(e positions.Execution) string {
-	// Source row is audit information, not identity: overlapping TOS exports
-	// commonly place the same execution at a different row offset.
-	return fmt.Sprintf("%s|%s|%s|%d|%d|%d", e.Account, e.Symbol, e.Action, e.Quantity, e.Price, e.At.UnixMicro())
+	// Thinkorswim may report distinct partial fills with the same second,
+	// symbol, side, quantity, and price. Occurrence distinguishes those fills
+	// within a statement while staying stable across overlapping exports, whose
+	// source-row offsets may differ.
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%d|%d", e.Account, e.Symbol, e.Action, e.Quantity, e.Price, e.At.UnixMicro(), e.Occurrence)
 }
 func (s *Store) Commit(ctx context.Context, sha, name string, execs []positions.Execution, rejected []string) (int, int, error) {
 	tx, e := s.DB.BeginTx(ctx, nil)

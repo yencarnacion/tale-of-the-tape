@@ -25,6 +25,32 @@ func TestTradesHonorsEndWithoutStart(t *testing.T) {
 	}
 }
 
+func TestCommitRetainsDistinctSameSecondFills(t *testing.T) {
+	s, e := Open(t.TempDir()+"/t.db", time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	at := time.Date(2026, 7, 31, 13, 50, 21, 0, time.UTC)
+	rows := []positions.Execution{
+		{Account: "a", Symbol: "IREN", Action: "sell", Quantity: 200, Price: 39 * positions.Scale, At: at.Add(-time.Minute), Row: 1},
+		{Account: "a", Symbol: "IREN", Action: "buy", Quantity: 100, Price: 37_360_000, At: at, Row: 2, Occurrence: 1},
+		{Account: "a", Symbol: "IREN", Action: "buy", Quantity: 100, Price: 37_360_000, At: at, Row: 3, Occurrence: 2},
+	}
+	_, added, e := s.Commit(context.Background(), "same-second-fills", "statement.csv", rows, nil)
+	if e != nil || added != len(rows) {
+		t.Fatalf("added=%d err=%v; distinct statement rows must not be collapsed", added, e)
+	}
+	var count int
+	if e = s.DB.QueryRow("SELECT count(*) FROM executions").Scan(&count); e != nil || count != len(rows) {
+		t.Fatalf("executions=%d err=%v", count, e)
+	}
+	_, added, e = s.Commit(context.Background(), "same-second-fills-overlap", "overlap.csv", rows, nil)
+	if e != nil || added != 0 {
+		t.Fatalf("overlapping statement added=%d err=%v", added, e)
+	}
+}
+
 func TestBarCoverageRequiresTheWholeRequestedInterval(t *testing.T) {
 	s, e := Open(t.TempDir()+"/t.db", time.Second)
 	if e != nil {
