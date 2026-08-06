@@ -208,7 +208,7 @@ func dailyLossReport(ctx context.Context, st *storage.Store, loc *time.Location,
 		}
 	}
 	if bestLimit > 0 {
-		fmt.Printf("best tested limit: $%.2f; hypothetical P&L $%.2f (tested $%.2f through $%.2f in $%.2f steps)\n", float64(bestLimit)/float64(positions.Scale), float64(best.WithStop)/float64(positions.Scale), minimum, maxObserved, step)
+		fmt.Printf("current recommendation: $%.2f max daily loss; hypothetical P&L $%.2f (tested $%.2f through $%.2f in $%.2f steps; recalculates as enriched days are added)\n", float64(bestLimit)/float64(positions.Scale), float64(best.WithStop)/float64(positions.Scale), minimum, maxObserved, step)
 	}
 	return nil
 }
