@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"tale-of-the-tape/internal/config"
+	"tale-of-the-tape/internal/dailyloss"
 	"tale-of-the-tape/internal/importer"
 	"tale-of-the-tape/internal/positions"
 	"tale-of-the-tape/internal/server"
@@ -39,6 +40,10 @@ func run() error {
 	date := fs.String("date", "", "date YYYY-MM-DD")
 	start := fs.String("start", "", "start YYYY-MM-DD")
 	end := fs.String("end", "", "end YYYY-MM-DD")
+	dailyLoss := fs.Float64("max-daily-loss", 3000, "daily loss limit in dollars")
+	minLoss := fs.Float64("min-loss", 100, "lowest limit tested in dollars")
+	maxLoss := fs.Float64("max-loss", 0, "highest limit tested in dollars; 0 selects the data maximum")
+	stepLoss := fs.Float64("loss-step", 100, "limit increment tested in dollars")
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
@@ -138,8 +143,11 @@ func run() error {
 		return nil
 	case "verify":
 		return verify(st)
+	case "daily-loss-report":
+		loc, _ := time.LoadLocation(cfg.Import.AssumedTimezone)
+		return dailyLossReport(ctx, st, loc, *dailyLoss, *minLoss, *maxLoss, *stepLoss, *start, *end)
 	default:
-		return fmt.Errorf("unknown command %q; use serve, demo, import, enrich, backup, or verify", mode)
+		return fmt.Errorf("unknown command %q; use serve, demo, import, enrich, backup, verify, or daily-loss-report", mode)
 	}
 }
 func verify(st *storage.Store) error {
@@ -149,6 +157,67 @@ func verify(st *storage.Store) error {
 	}
 	fmt.Println("database integrity check: ok")
 	return nil
+}
+
+func dailyLossReport(ctx context.Context, st *storage.Store, loc *time.Location, requested, minimum, maximum, step float64, start, end string) error {
+	if requested <= 0 || minimum <= 0 || step <= 0 || maximum < 0 {
+		return fmt.Errorf("daily-loss-report limits must be positive (and max-loss cannot be negative)")
+	}
+	trades, err := st.DailyLossTrades(ctx, loc)
+	if err != nil {
+		return err
+	}
+	filtered := make([]dailyloss.Trade, 0, len(trades))
+	for _, t := range trades {
+		if (start != "" && t.Date < start) || (end != "" && t.Date > end) {
+			continue
+		}
+		filtered = append(filtered, dailyloss.Trade{Date: t.Date, At: t.At, Net: t.Net, MAE: t.MAE, HasMAE: t.HasMAE})
+	}
+	limit := int64(requested * float64(positions.Scale))
+	report := dailyloss.Calculate(filtered, limit)
+	if len(report.Days) == 0 {
+		return fmt.Errorf("no same-day flat-to-flat trades in the selected date range")
+	}
+	fmt.Printf("daily-loss report: $%.2f limit; %d same-day trades; %d/%d days have intratrade market data\n", requested, len(filtered), report.CompleteDays, len(report.Days))
+	fmt.Println("date        actual       with-stop    stopped  skipped  market-data")
+	for _, d := range report.Days {
+		status := "complete"
+		if !d.CompleteMarketData {
+			status = "missing"
+		}
+		fmt.Printf("%-10s %12.2f %12s %8t %8d  %s\n", d.Date, float64(d.Actual)/float64(positions.Scale), moneyOrNA(d.WithStop, d.CompleteMarketData), d.Stopped, d.Skipped, status)
+	}
+	fmt.Printf("eligible totals: actual $%.2f; with $%.2f daily loss $%.2f; change $%.2f\n", float64(report.Actual)/float64(positions.Scale), requested, float64(report.WithStop)/float64(positions.Scale), float64(report.WithStop-report.Actual)/float64(positions.Scale))
+	if report.CompleteDays == 0 {
+		return fmt.Errorf("no complete market-data days; run enrich before interpreting a daily-loss simulation")
+	}
+	maxObserved := maximum
+	if maxObserved == 0 {
+		for _, t := range filtered {
+			if t.HasMAE && float64(-t.MAE)/float64(positions.Scale) > maxObserved {
+				maxObserved = float64(-t.MAE) / float64(positions.Scale)
+			}
+		}
+	}
+	bestLimit, best := int64(0), report
+	for candidate := minimum; candidate <= maxObserved+0.000001; candidate += step {
+		r := dailyloss.Calculate(filtered, int64(candidate*float64(positions.Scale)))
+		if r.CompleteDays == report.CompleteDays && (bestLimit == 0 || r.WithStop > best.WithStop) {
+			bestLimit, best = int64(candidate*float64(positions.Scale)), r
+		}
+	}
+	if bestLimit > 0 {
+		fmt.Printf("best tested limit: $%.2f; hypothetical P&L $%.2f (tested $%.2f through $%.2f in $%.2f steps)\n", float64(bestLimit)/float64(positions.Scale), float64(best.WithStop)/float64(positions.Scale), minimum, maxObserved, step)
+	}
+	return nil
+}
+
+func moneyOrNA(value int64, available bool) string {
+	if !available {
+		return "          N/A"
+	}
+	return fmt.Sprintf("%12.2f", float64(value)/float64(positions.Scale))
 }
 func loadDemo(ctx context.Context, st *storage.Store) error {
 	var n int

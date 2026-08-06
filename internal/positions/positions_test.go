@@ -61,3 +61,14 @@ func TestBuildSessionsDoesNotCarryResidualInventoryIntoNextDay(t *testing.T) {
 		t.Fatalf("sessions=%#v", got)
 	}
 }
+
+func TestBuildContinuousKeepsOvernightPositionTogether(t *testing.T) {
+	dayOne := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	got := BuildContinuous([]Execution{
+		{Account: "a", Symbol: "IREN", Action: "buy", Quantity: 100, Price: 10 * Scale, At: dayOne, Row: 1},
+		{Account: "a", Symbol: "IREN", Action: "sell", Quantity: 100, Price: 11 * Scale, At: dayOne.AddDate(0, 0, 1), Row: 1},
+	})
+	if len(got) != 1 || !got[0].Entry.Equal(dayOne) || !got[0].Exit.Equal(dayOne.AddDate(0, 0, 1)) {
+		t.Fatalf("trades=%#v", got)
+	}
+}

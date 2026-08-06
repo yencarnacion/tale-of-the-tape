@@ -450,6 +450,15 @@ type Trade struct {
 	Note           string     `json:"note"`
 	Excursion      *Excursion `json:"excursion,omitempty"`
 }
+
+// DailyLossTrade is a completed position that opened and closed in one
+// trading day. Multi-day positions are deliberately absent.
+type DailyLossTrade struct {
+	Date    string
+	At, Net int64
+	MAE     int64
+	HasMAE  bool
+}
 type Tag struct {
 	ID       int64  `json:"id"`
 	Name     string `json:"name"`
@@ -527,6 +536,55 @@ func (s *Store) Trades(ctx context.Context, start, end time.Time) ([]Trade, erro
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// DailyLossTrades returns only positions that were flat-to-flat within a
+// single local trading day. It rebuilds continuously first, so an overnight
+// position cannot be misclassified merely because the UI presents sessions by
+// day. MAE is attached only when a saved intratrade excursion matches the
+// canonical day trade.
+func (s *Store) DailyLossTrades(ctx context.Context, loc *time.Location) ([]DailyLossTrade, error) {
+	xs, err := s.Executions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []DailyLossTrade
+	for _, r := range positions.BuildContinuous(xs) {
+		date := r.Entry.In(loc).Format("2006-01-02")
+		if date != r.Exit.In(loc).Format("2006-01-02") {
+			continue
+		}
+		var mae sql.NullInt64
+		err = s.DB.QueryRowContext(ctx, `SELECT x.mae FROM round_trips r
+			LEFT JOIN excursion_results x ON x.round_trip_id=r.id
+			WHERE r.account=? AND r.symbol=? AND r.direction=? AND r.entry_at=? AND r.exit_at=?
+			ORDER BY r.id LIMIT 1`, r.Account, r.Symbol, r.Direction, r.Entry.UnixMicro(), r.Exit.UnixMicro()).Scan(&mae)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+		out = append(out, DailyLossTrade{Date: date, At: r.Entry.UnixMicro(), Net: r.Net, MAE: mae.Int64, HasMAE: err == nil && mae.Valid})
+	}
+	return out, nil
+}
+
+// Executions returns the complete, audit-preserving execution history.
+func (s *Store) Executions(ctx context.Context) ([]positions.Execution, error) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT id,account,symbol,action,quantity,price,commission,fees,executed_at,source_row FROM executions ORDER BY account,symbol,executed_at,source_row")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var xs []positions.Execution
+	for rows.Next() {
+		var x positions.Execution
+		var at int64
+		if err = rows.Scan(&x.ID, &x.Account, &x.Symbol, &x.Action, &x.Quantity, &x.Price, &x.Commission, &x.Fees, &at, &x.Row); err != nil {
+			return nil, err
+		}
+		x.At = time.UnixMicro(at).UTC()
+		xs = append(xs, x)
+	}
+	return xs, rows.Err()
 }
 func (s *Store) Trade(ctx context.Context, id int64) (Trade, []positions.Execution, error) {
 	ts, e := s.Trades(ctx, time.Time{}, time.Time{})

@@ -6,3 +6,4 @@ backups/
 *.db-shm
 *.db-wal
 *.zip
+local-analysis/

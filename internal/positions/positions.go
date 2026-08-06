@@ -39,6 +39,29 @@ func Build(in []Execution) []RoundTrip {
 	return BuildSessions(in, loc)
 }
 
+// BuildContinuous reconstructs positions across the full execution history.
+// Unlike BuildSessions, it does not reset inventory at a new trading day. It
+// is useful for reports that must exclude positions held overnight.
+func BuildContinuous(in []Execution) []RoundTrip {
+	by := map[string][]Execution{}
+	for _, e := range in {
+		key := e.Account + "\x00" + e.Symbol
+		by[key] = append(by[key], e)
+	}
+	var out []RoundTrip
+	for _, xs := range by {
+		sort.SliceStable(xs, func(i, j int) bool {
+			if xs[i].At.Equal(xs[j].At) {
+				return xs[i].Row < xs[j].Row
+			}
+			return xs[i].At.Before(xs[j].At)
+		})
+		out = append(out, buildOne(xs)...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Exit.Before(out[j].Exit) })
+	return out
+}
+
 // BuildSessions reconstructs intraday flat-to-flat trades relative to each
 // trading day's opening inventory. This prevents overnight/core-position
 // residue from swallowing otherwise complete day trades on later dates.
