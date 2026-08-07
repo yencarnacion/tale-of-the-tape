@@ -204,9 +204,31 @@ func dailyLossReport(ctx context.Context, st *storage.Store, loc *time.Location,
 	}
 	maxObserved := maximum
 	if maxObserved == 0 {
+		// Always include the explicitly requested limit and a conservative
+		// no-stop bound. A single trade's MAE is not sufficient: realized
+		// losses from earlier trades can make the daily trough deeper.
+		maxObserved = requested
+		type dayRisk struct {
+			losses, worstMAE int64
+		}
+		risks := map[string]dayRisk{}
 		for _, t := range filtered {
-			if t.HasMAE && float64(-t.MAE)/float64(positions.Scale) > maxObserved {
-				maxObserved = float64(-t.MAE) / float64(positions.Scale)
+			if !t.HasMAE || t.Overlaps {
+				continue
+			}
+			risk := risks[t.Date]
+			if t.Net < 0 {
+				risk.losses -= t.Net
+			}
+			if -t.MAE > risk.worstMAE {
+				risk.worstMAE = -t.MAE
+			}
+			risks[t.Date] = risk
+		}
+		for _, risk := range risks {
+			bound := float64(risk.losses+risk.worstMAE) / float64(positions.Scale)
+			if bound > maxObserved {
+				maxObserved = bound
 			}
 		}
 	}
