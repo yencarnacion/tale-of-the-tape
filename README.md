@@ -113,7 +113,7 @@ passes through additional options, and saves a dated report under the ignored
 `local-analysis/` output directory:
 
 ```bash
-bash local-analysis/run-daily-loss-report.sh \
+scripts/daily-loss-report.sh \
   -start 2026-07-20 -end 2026-08-05 \
   -min-loss 2000 -max-loss 3000 -loss-step 100
 ```
