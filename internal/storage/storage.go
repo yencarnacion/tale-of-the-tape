@@ -454,10 +454,11 @@ type Trade struct {
 // DailyLossTrade is a completed position that opened and closed in one
 // trading day. Multi-day positions are deliberately absent.
 type DailyLossTrade struct {
-	Date    string
-	At, Net int64
-	MAE     int64
-	HasMAE  bool
+	Date                 string
+	EntryAt, ExitAt, Net int64
+	MAE, MAEAt           int64
+	HasMAE               bool
+	Overlaps             bool
 }
 type Tag struct {
 	ID       int64  `json:"id"`
@@ -548,21 +549,35 @@ func (s *Store) DailyLossTrades(ctx context.Context, loc *time.Location) ([]Dail
 	if err != nil {
 		return nil, err
 	}
-	var out []DailyLossTrade
+	type candidate struct {
+		r positions.RoundTrip
+		t DailyLossTrade
+	}
+	var candidates []candidate
 	for _, r := range positions.BuildContinuous(xs) {
 		date := r.Entry.In(loc).Format("2006-01-02")
 		if date != r.Exit.In(loc).Format("2006-01-02") {
 			continue
 		}
-		var mae sql.NullInt64
-		err = s.DB.QueryRowContext(ctx, `SELECT x.mae FROM round_trips r
+		var mae, maeAt sql.NullInt64
+		err = s.DB.QueryRowContext(ctx, `SELECT x.mae,x.mae_at FROM round_trips r
 			LEFT JOIN excursion_results x ON x.round_trip_id=r.id
 			WHERE r.account=? AND r.symbol=? AND r.direction=? AND r.entry_at=? AND r.exit_at=?
-			ORDER BY r.id LIMIT 1`, r.Account, r.Symbol, r.Direction, r.Entry.UnixMicro(), r.Exit.UnixMicro()).Scan(&mae)
+			ORDER BY r.id LIMIT 1`, r.Account, r.Symbol, r.Direction, r.Entry.UnixMicro(), r.Exit.UnixMicro()).Scan(&mae, &maeAt)
 		if err != nil && err != sql.ErrNoRows {
 			return nil, err
 		}
-		out = append(out, DailyLossTrade{Date: date, At: r.Entry.UnixMicro(), Net: r.Net, MAE: mae.Int64, HasMAE: err == nil && mae.Valid})
+		candidates = append(candidates, candidate{r: r, t: DailyLossTrade{Date: date, EntryAt: r.Entry.UnixMicro(), ExitAt: r.Exit.UnixMicro(), Net: r.Net, MAE: mae.Int64, MAEAt: maeAt.Int64, HasMAE: err == nil && mae.Valid && maeAt.Valid}})
+	}
+	out := make([]DailyLossTrade, len(candidates))
+	for i := range candidates {
+		for j := range candidates {
+			if i != j && candidates[i].r.Account == candidates[j].r.Account && candidates[i].t.Date == candidates[j].t.Date && candidates[i].t.EntryAt < candidates[j].t.ExitAt && candidates[j].t.EntryAt < candidates[i].t.ExitAt {
+				candidates[i].t.Overlaps = true
+				break
+			}
+		}
+		out[i] = candidates[i].t
 	}
 	return out, nil
 }

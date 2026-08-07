@@ -12,6 +12,8 @@ cp .env.example .env          # Massive is optional
 ./go.sh import -file import/2026.zip
 ./go.sh enrich -date 2026-01-02
 ./go.sh enrich -start 2026-01-01 -end 2026-01-31
+./go.sh daily-loss-report -max-daily-loss 3000
+./go.sh daily-loss-report -start 2026-07-01 -min-loss 2000 -max-loss 3000 -loss-step 100
 ./go.sh backup
 ./go.sh verify
 ```
@@ -54,6 +56,22 @@ gross realized P&L minus commissions and fees. A win/loss/scratch uses the
 configured scratch tolerance. Profit factor is gross wins divided by absolute
 gross losses; expectancy uses win probability and mean win/loss; Kelly excludes
 scratches and is displayed for analysis only.
+
+## Daily loss analysis
+
+`daily-loss-report` evaluates only positions opened and closed on the same
+trading day. A stop is considered reached when realized P&L from earlier exits
+plus the current trade's timestamped MAE reaches the requested daily loss.
+Later trades are excluded and liquidation is modeled at the limit, before
+slippage. The command also searches a configurable range for the highest
+historical P&L.
+
+The recommendation is in-sample and should be treated as a rolling diagnostic,
+not a guaranteed optimum. A day is excluded when intratrade data is missing.
+Days containing simultaneous positions in different symbols are also excluded:
+per-trade extrema cannot establish the exact portfolio-level equity path for
+overlapping positions. The report identifies both exclusions explicitly and
+warns when the best result is at a search boundary.
 
 ## Development
 

@@ -172,18 +172,28 @@ func dailyLossReport(ctx context.Context, st *storage.Store, loc *time.Location,
 		if (start != "" && t.Date < start) || (end != "" && t.Date > end) {
 			continue
 		}
-		filtered = append(filtered, dailyloss.Trade{Date: t.Date, At: t.At, Net: t.Net, MAE: t.MAE, HasMAE: t.HasMAE})
+		filtered = append(filtered, dailyloss.Trade{Date: t.Date, EntryAt: t.EntryAt, ExitAt: t.ExitAt, Net: t.Net, MAE: t.MAE, MAEAt: t.MAEAt, HasMAE: t.HasMAE, Overlaps: t.Overlaps})
 	}
 	limit := int64(requested * float64(positions.Scale))
 	report := dailyloss.Calculate(filtered, limit)
 	if len(report.Days) == 0 {
 		return fmt.Errorf("no same-day flat-to-flat trades in the selected date range")
 	}
-	fmt.Printf("daily-loss report: $%.2f limit; %d same-day trades; %d/%d days have intratrade market data\n", requested, len(filtered), report.CompleteDays, len(report.Days))
+	overlapDays, missingDays := 0, 0
+	for _, d := range report.Days {
+		if d.OverlappingTrades {
+			overlapDays++
+		} else if !d.CompleteMarketData {
+			missingDays++
+		}
+	}
+	fmt.Printf("daily-loss report: $%.2f limit; %d same-day trades; %d/%d days eligible (%d overlap, %d missing market data)\n", requested, len(filtered), report.CompleteDays, len(report.Days), overlapDays, missingDays)
 	fmt.Println("date        actual       with-stop    stopped  skipped  market-data")
 	for _, d := range report.Days {
 		status := "complete"
-		if !d.CompleteMarketData {
+		if d.OverlappingTrades {
+			status = "overlap-needs-portfolio-path"
+		} else if !d.CompleteMarketData {
 			status = "missing"
 		}
 		fmt.Printf("%-10s %12.2f %12s %8t %8d  %s\n", d.Date, float64(d.Actual)/float64(positions.Scale), moneyOrNA(d.WithStop, d.CompleteMarketData), d.Stopped, d.Skipped, status)
@@ -209,6 +219,9 @@ func dailyLossReport(ctx context.Context, st *storage.Store, loc *time.Location,
 	}
 	if bestLimit > 0 {
 		fmt.Printf("current recommendation: $%.2f max daily loss; hypothetical P&L $%.2f (tested $%.2f through $%.2f in $%.2f steps; recalculates as enriched days are added)\n", float64(bestLimit)/float64(positions.Scale), float64(best.WithStop)/float64(positions.Scale), minimum, maxObserved, step)
+		if bestLimit == int64(minimum*float64(positions.Scale)) || bestLimit == int64(maxObserved*float64(positions.Scale)) {
+			fmt.Println("warning: the best result is on a search boundary; treat it as an in-sample bound, not a stable optimum")
+		}
 	}
 	return nil
 }

@@ -25,6 +25,33 @@ func TestTradesHonorsEndWithoutStart(t *testing.T) {
 	}
 }
 
+func TestDailyLossTradesFlagsCrossSymbolOverlap(t *testing.T) {
+	s, err := Open(t.TempDir()+"/daily-loss.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	xs := []positions.Execution{
+		{Account: "a", Symbol: "A", Action: "buy", Quantity: 1, Price: positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "B", Action: "buy", Quantity: 1, Price: positions.Scale, At: at.Add(time.Minute), Row: 2},
+		{Account: "a", Symbol: "B", Action: "sell", Quantity: 1, Price: 2 * positions.Scale, At: at.Add(2 * time.Minute), Row: 3},
+		{Account: "a", Symbol: "A", Action: "sell", Quantity: 1, Price: 2 * positions.Scale, At: at.Add(3 * time.Minute), Row: 4},
+	}
+	if _, _, err = s.Commit(context.Background(), "overlap", "overlap.csv", xs, nil); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 2; id++ {
+		if err = s.SaveExcursion(context.Background(), id, Excursion{MAE: -1, MAEAt: at.Add(time.Minute).UnixMicro(), Source: "nbbo", Completeness: "complete", Events: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.DailyLossTrades(context.Background(), time.UTC)
+	if err != nil || len(got) != 2 || !got[0].Overlaps || !got[1].Overlaps {
+		t.Fatalf("trades=%#v err=%v", got, err)
+	}
+}
+
 func TestCommitRetainsDistinctSameSecondFills(t *testing.T) {
 	s, e := Open(t.TempDir()+"/t.db", time.Second)
 	if e != nil {

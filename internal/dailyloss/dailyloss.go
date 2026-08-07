@@ -7,10 +7,12 @@ import "sort"
 // from that trade's entry; a nil MAE means that intratrade market data is not
 // available, so the stop cannot be evaluated for that day.
 type Trade struct {
-	Date     string
-	At       int64
-	Net, MAE int64
-	HasMAE   bool
+	Date          string
+	EntryAt       int64
+	ExitAt, MAEAt int64
+	Net, MAE      int64
+	HasMAE        bool
+	Overlaps      bool
 }
 
 type Day struct {
@@ -18,6 +20,7 @@ type Day struct {
 	Actual, WithStop            int64
 	Trades, Skipped             int
 	Stopped, CompleteMarketData bool
+	OverlappingTrades           bool
 }
 
 type Report struct {
@@ -37,7 +40,7 @@ func Calculate(trades []Trade, limit int64) Report {
 	}
 	sort.SliceStable(trades, func(i, j int) bool {
 		if trades[i].Date == trades[j].Date {
-			return trades[i].At < trades[j].At
+			return trades[i].EntryAt < trades[j].EntryAt
 		}
 		return trades[i].Date < trades[j].Date
 	})
@@ -51,21 +54,53 @@ func Calculate(trades []Trade, limit int64) Report {
 			if !trades[j].HasMAE {
 				d.CompleteMarketData = false
 			}
+			if trades[j].Overlaps {
+				d.CompleteMarketData = false
+				d.OverlappingTrades = true
+			}
 			j++
 		}
 		if d.CompleteMarketData {
+			type event struct {
+				at     int64
+				trade  int
+				isExit bool
+			}
+			events := make([]event, 0, (j-i)*2)
 			for k := i; k < j; k++ {
-				t := trades[k]
-				if d.Stopped {
-					d.Skipped++
+				events = append(events, event{at: trades[k].MAEAt, trade: k}, event{at: trades[k].ExitAt, trade: k, isExit: true})
+			}
+			sort.SliceStable(events, func(a, b int) bool {
+				if events[a].at == events[b].at {
+					return events[a].isExit && !events[b].isExit
+				}
+				return events[a].at < events[b].at
+			})
+			realized := int64(0)
+			exited := make([]bool, len(trades))
+			for _, e := range events {
+				if e.isExit {
+					realized += trades[e.trade].Net
+					exited[e.trade] = true
 					continue
 				}
-				if d.WithStop+t.MAE <= -limit {
+				base := realized
+				if exited[e.trade] {
+					base -= trades[e.trade].Net
+				}
+				if base+trades[e.trade].MAE <= -limit {
 					d.WithStop = -limit
 					d.Stopped = true
-					continue
+					for k := i; k < j; k++ {
+						if trades[k].EntryAt > e.at {
+							d.Skipped++
+						}
+					}
+					break
 				}
-				d.WithStop += t.Net
+			}
+			if !d.Stopped {
+				d.WithStop = d.Actual
 			}
 			r.Actual += d.Actual
 			r.WithStop += d.WithStop
