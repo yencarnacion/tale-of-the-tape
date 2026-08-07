@@ -73,6 +73,51 @@ per-trade extrema cannot establish the exact portfolio-level equity path for
 overlapping positions. The report identifies both exclusions explicitly and
 warns when the best result is at a search boundary.
 
+Enrich the desired period before running the report so every eligible trade
+has an intratrade MAE:
+
+```bash
+./go.sh enrich -start 2026-01-01 -end 2026-12-31
+```
+
+Report a $2,300 daily stop over all imported history and search for the best
+historical limit using the default $100 increments:
+
+```bash
+./go.sh daily-loss-report -max-daily-loss 2300
+```
+
+Analyze a specific date range and restrict the recommendation search to
+$2,000–$3,000:
+
+```bash
+./go.sh daily-loss-report \
+  -start 2026-07-20 \
+  -end 2026-08-05 \
+  -max-daily-loss 2300 \
+  -min-loss 2000 \
+  -max-loss 3000 \
+  -loss-step 100
+```
+
+Dates are inclusive. The main options are:
+
+- `-max-daily-loss`: limit used for the detailed per-day simulation.
+- `-start` and `-end`: optional inclusive `YYYY-MM-DD` bounds.
+- `-min-loss`, `-max-loss`, and `-loss-step`: recommendation search range.
+  A `-max-loss` of `0` automatically includes a conservative no-stop bound.
+- `-db`: optional path to a different local SQLite database.
+
+The versioned convenience runner uses a $2,300 detailed limit by default,
+passes through additional options, and saves a dated report under the ignored
+`local-analysis/` output directory:
+
+```bash
+bash local-analysis/run-daily-loss-report.sh \
+  -start 2026-07-20 -end 2026-08-05 \
+  -min-loss 2000 -max-loss 3000 -loss-step 100
+```
+
 ## Development
 
 ```bash

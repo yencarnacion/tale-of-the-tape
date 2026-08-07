@@ -6,4 +6,7 @@ backups/
 *.db-shm
 *.db-wal
 *.zip
-local-analysis/
+# Keep generated local reports and provider logs private, but version the
+# reusable daily-loss report runner below.
+local-analysis/*
+!local-analysis/run-daily-loss-report.sh
