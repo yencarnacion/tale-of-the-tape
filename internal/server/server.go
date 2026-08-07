@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -58,6 +59,13 @@ func applyStoredSettings(c *config.Config, s *storage.Store) {
 	if value, err := s.Setting(ctx, "default_timeframe"); err == nil && (value == "1m" || value == "5m") {
 		c.Chart.DefaultTimeframe = value
 	}
+	if value, err := s.Setting(ctx, "polygon_charts_url"); err == nil && validHTTPURL(value) {
+		c.Chart.PolygonChartsURL = strings.TrimRight(value, "/")
+	}
+}
+func validHTTPURL(value string) bool {
+	u, err := url.ParseRequestURI(value)
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
 }
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
@@ -140,6 +148,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			Timezone         *string  `json:"timezone"`
 			ScratchTolerance *float64 `json:"scratch_tolerance"`
 			DefaultTimeframe *string  `json:"default_timeframe"`
+			PolygonChartsURL *string  `json:"polygon_charts_url"`
 		}
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
@@ -159,6 +168,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.DefaultTimeframe != nil && *in.DefaultTimeframe != "1m" && *in.DefaultTimeframe != "5m" {
 			bad(w, "invalid_settings", "Default timeframe must be 1m or 5m.", http.StatusBadRequest)
+			return
+		}
+		if in.PolygonChartsURL != nil && !validHTTPURL(strings.TrimSpace(*in.PolygonChartsURL)) {
+			bad(w, "invalid_settings", "Polygon Charts URL must be an http or https URL.", http.StatusBadRequest)
 			return
 		}
 		if in.Timezone != nil {
@@ -181,6 +194,14 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.cfg.Chart.DefaultTimeframe = *in.DefaultTimeframe
+		}
+		if in.PolygonChartsURL != nil {
+			value := strings.TrimRight(strings.TrimSpace(*in.PolygonChartsURL), "/")
+			if e := s.store.SetSetting(r.Context(), "polygon_charts_url", value); e != nil {
+				bad(w, "update_failed", e.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.cfg.Chart.PolygonChartsURL = value
 		}
 		jsonOut(w, map[string]bool{"ok": true})
 	default:
@@ -479,7 +500,7 @@ func (s *Server) trade(w http.ResponseWriter, r *http.Request) {
 	x, _ := s.store.Excursion(r.Context(), id)
 	loc, _ := time.LoadLocation(s.cfg.App.Timezone)
 	tradingDay := time.UnixMicro(t.ExitAt).In(loc).Format("2006-01-02")
-	jsonOut(w, map[string]any{"trade": t, "executions": xs, "excursion": x, "trading_day": tradingDay, "massive_status": map[bool]string{true: "configured", false: "Massive API key not configured"}[s.cfg.Massive.APIKey != ""]})
+	jsonOut(w, map[string]any{"trade": t, "executions": xs, "excursion": x, "trading_day": tradingDay, "timezone": s.cfg.App.Timezone, "polygon_charts_url": s.cfg.Chart.PolygonChartsURL, "massive_status": map[bool]string{true: "configured", false: "Massive API key not configured"}[s.cfg.Massive.APIKey != ""]})
 }
 func (s *Server) bulkTradeTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -923,6 +944,10 @@ func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, t)
 		return
 	}
+	if r.Method != http.MethodGet {
+		bad(w, "method_not_allowed", "Method not allowed.", http.StatusMethodNotAllowed)
+		return
+	}
 	x, e := s.store.Tags(r.Context())
 	if e != nil {
 		bad(w, "database", e.Error(), 500)
@@ -936,7 +961,15 @@ func (s *Server) tag(w http.ResponseWriter, r *http.Request) {
 		bad(w, "invalid_tag", "Invalid tag ID.", 400)
 		return
 	}
-	if r.Method != "PATCH" {
+	if r.Method == http.MethodDelete {
+		if e = s.store.DeleteTag(r.Context(), id); e != nil {
+			bad(w, "delete_tag", e.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonOut(w, map[string]bool{"ok": true})
+		return
+	}
+	if r.Method != http.MethodPatch {
 		bad(w, "method_not_allowed", "Method not allowed.", 405)
 		return
 	}
@@ -952,6 +985,7 @@ func (s *Server) tag(w http.ResponseWriter, r *http.Request) {
 	if in.Color == "" {
 		in.Color = "#58a6ff"
 	}
+	in.Name = strings.TrimSpace(in.Name)
 	if e = s.store.UpdateTag(r.Context(), id, in.Name, in.Color, in.Archived); e != nil {
 		bad(w, "update_tag", e.Error(), 500)
 		return
@@ -969,13 +1003,23 @@ func (s *Server) addTradeTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		TagID int64 `json:"tag_id"`
+		TagID int64  `json:"tag_id"`
+		Name  string `json:"name"`
+		Color string `json:"color"`
 	}
-	if e = json.NewDecoder(r.Body).Decode(&in); e != nil || in.TagID < 1 {
-		bad(w, "invalid_tag", "A tag_id is required.", 400)
+	if e = json.NewDecoder(r.Body).Decode(&in); e != nil || (in.TagID < 1 && strings.TrimSpace(in.Name) == "") {
+		bad(w, "invalid_tag", "A tag_id or name is required.", 400)
 		return
 	}
-	if e = s.store.AddTradeTag(r.Context(), id, in.TagID); e != nil {
+	if in.TagID > 0 {
+		e = s.store.AddTradeTag(r.Context(), id, in.TagID)
+	} else {
+		if in.Color == "" {
+			in.Color = "#58a6ff"
+		}
+		_, e = s.store.EnsureTradeTag(r.Context(), id, strings.TrimSpace(in.Name), in.Color)
+	}
+	if e != nil {
 		bad(w, "assign_tag", e.Error(), 500)
 		return
 	}
@@ -1253,10 +1297,6 @@ type breakdown struct {
 	Summary analytics.Summary `json:"summary"`
 }
 
-func tradeRoundTrip(t storage.Trade) positions.RoundTrip {
-	return positions.RoundTrip{Net: t.Net, Gross: t.Gross, Commissions: t.Commissions, Fees: t.Fees}
-}
-
 // breakdowns keeps pattern recognition on the same date-filtered population
 // as the dashboard summary. Tags deliberately count a multi-tagged trade in
 // each selected tag's own cohort rather than attempting to allocate its P&L.
@@ -1266,13 +1306,12 @@ func (s *Server) breakdowns(w http.ResponseWriter, r *http.Request) {
 		bad(w, "invalid_filter", e.Error(), 400)
 		return
 	}
-	groups := map[string]map[string][]positions.RoundTrip{
+	groups := map[string]map[string][]storage.Trade{
 		"tag": {}, "symbol": {}, "direction": {}, "weekday": {}, "entry_time": {}, "holding_time": {},
 	}
 	loc, _ := time.LoadLocation(s.cfg.App.Timezone)
 	for _, t := range ts {
-		rt := tradeRoundTrip(t)
-		add := func(kind, name string) { groups[kind][name] = append(groups[kind][name], rt) }
+		add := func(kind, name string) { groups[kind][name] = append(groups[kind][name], t) }
 		add("symbol", t.Symbol)
 		add("direction", t.Direction)
 		entry := time.UnixMicro(t.EntryAt).In(loc)
@@ -1298,8 +1337,14 @@ func (s *Server) breakdowns(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string][]breakdown{}
 	for kind, buckets := range groups {
-		for name, rs := range buckets {
-			out[kind] = append(out[kind], breakdown{Name: name, Summary: analytics.Calculate(rs, s.cfg.Import.ScratchTolerance, s.cfg.Analytics.KellyMinimumSample)})
+		for name, cohort := range buckets {
+			rs := make([]positions.RoundTrip, len(cohort))
+			for i, trade := range cohort {
+				rs[i] = positions.RoundTrip{Entry: time.UnixMicro(trade.EntryAt), Exit: time.UnixMicro(trade.ExitAt), Entered: trade.Entered, Exited: trade.Exited, Net: trade.Net, Gross: trade.Gross, Commissions: trade.Commissions, Fees: trade.Fees}
+			}
+			summary := analytics.Calculate(rs, s.cfg.Import.ScratchTolerance, s.cfg.Analytics.KellyMinimumSample)
+			s.enrichSummary(r.Context(), &summary, cohort)
+			out[kind] = append(out[kind], breakdown{Name: name, Summary: summary})
 		}
 		// Stable API output makes comparisons and tests deterministic.
 		slices.SortFunc(out[kind], func(a, b breakdown) int { return strings.Compare(a.Name, b.Name) })

@@ -10,3 +10,6 @@
 .chart-mode{display:inline-flex;gap:3px}.chart-mode button{padding:5px 8px;font-size:12px}.chart-mode button.active{background:#1f6feb;border-color:var(--blue)}
 .toolbar-divider{width:1px;height:28px;background:var(--line);margin:0 2px}.indicator-settings{margin:-7px 0 10px;color:var(--muted)}.indicator-settings summary{cursor:pointer;font-size:12px}.indicator-settings .indicator-controls{padding-top:7px}.chart-help{margin:7px 0 0;font-size:12px}
 @media(max-width:1100px){.edge-grid{grid-template-columns:1fr 1fr}.edge-grid .edge-panel:first-child{grid-column:1/-1}}@media(max-width:900px){.chart-grid{grid-template-columns:1fr}}@media(max-width:700px){.edge-grid{grid-template-columns:1fr}.edge-grid .edge-panel:first-child{grid-column:auto}.edge-row{grid-template-columns:minmax(82px,1fr) minmax(75px,1fr) auto}}
+.tag button{padding:2px 6px;border:0}.tag-remove{font-size:17px;line-height:1;background:transparent}.tag-entry #new-tag{min-width:220px}.danger{color:var(--red)}
+.chart{height:600px;background:#121d2d;border:1px solid #2b3a52;border-radius:6px;overflow:hidden}
+.button{display:inline-block;background:#21262d;border:1px solid var(--line);border-radius:6px;padding:8px 11px;color:var(--ink);cursor:pointer;text-decoration:none}.button:hover{border-color:var(--blue)}.polygon-link{border-color:#385b7d;color:#8ed0ff}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,6 +122,9 @@ func TestBreakdownsShareTheDateFilteredPopulation(t *testing.T) {
 	if _, _, err = st.Commit(context.Background(), "breakdowns", "b.csv", rows, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err = st.SaveExcursion(context.Background(), 1, storage.Excursion{MFE: 2 * positions.Scale, MAE: -positions.Scale, Completeness: "complete", Source: "nbbo"}); err != nil {
+		t.Fatal(err)
+	}
 	s := New(config.Defaults(), st)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/analytics/breakdowns?start=2026-01-02&end=2026-01-02", nil))
@@ -130,7 +134,9 @@ func TestBreakdownsShareTheDateFilteredPopulation(t *testing.T) {
 	var got map[string][]struct {
 		Name    string `json:"name"`
 		Summary struct {
-			Total int `json:"total_trades"`
+			Total      int      `json:"total_trades"`
+			AverageMFE *float64 `json:"average_mfe"`
+			AverageMAE *float64 `json:"average_mae"`
 		} `json:"summary"`
 	}
 	if err = json.NewDecoder(w.Body).Decode(&got); err != nil {
@@ -138,6 +144,9 @@ func TestBreakdownsShareTheDateFilteredPopulation(t *testing.T) {
 	}
 	if len(got["symbol"]) != 1 || got["symbol"][0].Name != "ABC" || got["symbol"][0].Summary.Total != 1 {
 		t.Fatalf("unexpected symbol breakdown: %#v", got["symbol"])
+	}
+	if got["symbol"][0].Summary.AverageMFE == nil || *got["symbol"][0].Summary.AverageMFE != 2 || got["symbol"][0].Summary.AverageMAE == nil || *got["symbol"][0].Summary.AverageMAE != -1 {
+		t.Fatalf("missing excursion averages: %#v", got["symbol"][0].Summary)
 	}
 }
 
@@ -362,6 +371,46 @@ func TestBulkTradeTags(t *testing.T) {
 	}
 }
 
+func TestTradeTagCreateReuseRemoveAndPrune(t *testing.T) {
+	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	rows := []positions.Execution{
+		{Account: "a", Symbol: "A", Action: "buy", Quantity: 1, Price: positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "A", Action: "sell", Quantity: 1, Price: 2 * positions.Scale, At: at.Add(time.Minute), Row: 2},
+	}
+	if _, _, err = st.Commit(context.Background(), "tag-lifecycle", "t.csv", rows, nil); err != nil {
+		t.Fatal(err)
+	}
+	s := New(config.Defaults(), st)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/trades/1/tags", strings.NewReader(`{"name":"rb","color":"#58a6ff"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("add=%d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/trades/1/tags", strings.NewReader(`{"name":"RB"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("reuse=%d %s", w.Code, w.Body.String())
+	}
+	tags, err := st.Tags(context.Background())
+	if err != nil || len(tags) != 1 || tags[0].Name != "rb" {
+		t.Fatalf("tags=%#v err=%v", tags, err)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/trades/1/tags/%d", tags[0].ID), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("remove=%d %s", w.Code, w.Body.String())
+	}
+	tags, err = st.Tags(context.Background())
+	if err != nil || len(tags) != 0 {
+		t.Fatalf("unused tag was not pruned: %#v err=%v", tags, err)
+	}
+}
+
 func TestSettingsPatchPersistsNonSecretValues(t *testing.T) {
 	st, err := storage.Open(t.TempDir()+"/t.db", time.Second)
 	if err != nil {
@@ -370,12 +419,12 @@ func TestSettingsPatchPersistsNonSecretValues(t *testing.T) {
 	defer st.Close()
 	s := New(config.Defaults(), st)
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"timezone":"America/Chicago","scratch_tolerance":0.02,"default_timeframe":"5m"}`)))
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"timezone":"America/Chicago","scratch_tolerance":0.02,"default_timeframe":"5m","polygon_charts_url":"http://localhost:9090/"}`)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch=%d %s", w.Code, w.Body.String())
 	}
 	reloaded := New(config.Defaults(), st)
-	if reloaded.cfg.App.Timezone != "America/Chicago" || reloaded.cfg.Import.ScratchTolerance != 0.02 || reloaded.cfg.Chart.DefaultTimeframe != "5m" {
+	if reloaded.cfg.App.Timezone != "America/Chicago" || reloaded.cfg.Import.ScratchTolerance != 0.02 || reloaded.cfg.Chart.DefaultTimeframe != "5m" || reloaded.cfg.Chart.PolygonChartsURL != "http://localhost:9090" {
 		t.Fatalf("stored settings=%#v", reloaded.cfg)
 	}
 }

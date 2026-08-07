@@ -652,7 +652,9 @@ func (s *Store) tagsFor(ctx context.Context, id int64) ([]Tag, error) {
 	return ts, rows.Err()
 }
 func (s *Store) Tags(ctx context.Context) ([]Tag, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT id,name,color,archived FROM tags ORDER BY archived,name")
+	rows, e := s.DB.QueryContext(ctx, `SELECT t.id,t.name,t.color,t.archived FROM tags t
+		WHERE EXISTS(SELECT 1 FROM round_trip_tags rt WHERE rt.tag_id=t.id)
+		ORDER BY t.archived,t.name`)
 	if e != nil {
 		return nil, e
 	}
@@ -679,13 +681,68 @@ func (s *Store) UpdateTag(ctx context.Context, id int64, name, color string, arc
 	_, e := s.DB.ExecContext(ctx, "UPDATE tags SET name=?,color=?,archived=? WHERE id=?", name, color, boolInt(archived), id)
 	return e
 }
+func (s *Store) DeleteTag(ctx context.Context, id int64) error {
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "DELETE FROM round_trip_tags WHERE tag_id=?", id); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM tags WHERE id=?", id); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
+func (s *Store) EnsureTradeTag(ctx context.Context, tradeID int64, name, color string) (Tag, error) {
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return Tag{}, e
+	}
+	defer tx.Rollback()
+	var t Tag
+	var archived int
+	e = tx.QueryRowContext(ctx, "SELECT id,name,color,archived FROM tags WHERE name=? COLLATE NOCASE", name).Scan(&t.ID, &t.Name, &t.Color, &archived)
+	if e == sql.ErrNoRows {
+		r, insertErr := tx.ExecContext(ctx, "INSERT INTO tags(name,color) VALUES(?,?)", name, color)
+		if insertErr != nil {
+			return Tag{}, insertErr
+		}
+		t.ID, _ = r.LastInsertId()
+		t.Name, t.Color = name, color
+	} else if e != nil {
+		return Tag{}, e
+	}
+	t.Archived = false
+	if _, e = tx.ExecContext(ctx, "UPDATE tags SET archived=0 WHERE id=?", t.ID); e != nil {
+		return Tag{}, e
+	}
+	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO round_trip_tags(round_trip_id,tag_id) VALUES(?,?)", tradeID, t.ID); e != nil {
+		return Tag{}, e
+	}
+	if e = tx.Commit(); e != nil {
+		return Tag{}, e
+	}
+	return t, nil
+}
 func (s *Store) AddTradeTag(ctx context.Context, tradeID, tagID int64) error {
 	_, e := s.DB.ExecContext(ctx, "INSERT OR IGNORE INTO round_trip_tags(round_trip_id,tag_id) VALUES(?,?)", tradeID, tagID)
 	return e
 }
 func (s *Store) RemoveTradeTag(ctx context.Context, tradeID, tagID int64) error {
-	_, e := s.DB.ExecContext(ctx, "DELETE FROM round_trip_tags WHERE round_trip_id=? AND tag_id=?", tradeID, tagID)
-	return e
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "DELETE FROM round_trip_tags WHERE round_trip_id=? AND tag_id=?", tradeID, tagID); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM tags WHERE id=? AND NOT EXISTS(SELECT 1 FROM round_trip_tags WHERE tag_id=?)", tagID, tagID); e != nil {
+		return e
+	}
+	return tx.Commit()
 }
 func (s *Store) BulkTradeTags(ctx context.Context, tradeIDs, tagIDs []int64, mode string) error {
 	tx, e := s.DB.BeginTx(ctx, nil)
@@ -716,6 +773,9 @@ func (s *Store) BulkTradeTags(ctx context.Context, tradeIDs, tagIDs []int64, mod
 			}
 		}
 	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM round_trip_tags WHERE tag_id=tags.id)"); e != nil {
+		return e
+	}
 	return tx.Commit()
 }
 func boolInt(v bool) int {
@@ -740,6 +800,9 @@ func (s *Store) SetTrade(ctx context.Context, id int64, note string, tags []int6
 		if _, e = tx.ExecContext(ctx, "INSERT INTO round_trip_tags(round_trip_id,tag_id)VALUES(?,?)", id, tag); e != nil {
 			return e
 		}
+	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM tags WHERE NOT EXISTS(SELECT 1 FROM round_trip_tags WHERE tag_id=tags.id)"); e != nil {
+		return e
 	}
 	return tx.Commit()
 }

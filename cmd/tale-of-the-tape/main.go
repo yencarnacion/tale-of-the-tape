@@ -96,6 +96,11 @@ func run() error {
 		if e != nil {
 			return e
 		}
+		for _, snapshot := range p.BrokerPnL {
+			if e = st.StoreBrokerPnL(ctx, id, snapshot.StatementDate, snapshot.Day, snapshot.YTD, snapshot.FeesYTD); e != nil {
+				return e
+			}
+		}
 		fmt.Printf("import batch %d: %d accepted rows, %d new executions, %d rejected rows\n", id, p.Accepted, n, len(p.Rejected))
 		return nil
 	case "backup":

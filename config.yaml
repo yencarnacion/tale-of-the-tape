@@ -28,6 +28,7 @@ chart:
   include_extended_hours: true
   default_timeframe: 1m
   enabled_indicators: [vwap, sma9, sma20, ema9, ema20, bollinger20, volume]
+  polygon_charts_url: http://localhost:8081
 analytics:
   kelly_minimum_sample: 30
   default_date_range: month_to_date

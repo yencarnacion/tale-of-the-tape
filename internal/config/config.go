@@ -53,6 +53,7 @@ type Chart struct {
 	IncludeExtendedHours bool     `yaml:"include_extended_hours"`
 	DefaultTimeframe     string   `yaml:"default_timeframe"`
 	EnabledIndicators    []string `yaml:"enabled_indicators"`
+	PolygonChartsURL     string   `yaml:"polygon_charts_url"`
 }
 type Analytics struct {
 	KellyMinimumSample        int    `yaml:"kelly_minimum_sample"`
@@ -61,7 +62,7 @@ type Analytics struct {
 }
 
 func Defaults() Config {
-	return Config{App: App{"tale-of-the-tape", "127.0.0.1:3000", "America/New_York"}, Storage: Storage{"data/tale-of-the-tape.db", "data/imports", "backups", 5 * time.Second}, Import: Import{"thinkorswim", "America/New_York", "exit_date", .01, 25}, Massive: Massive{"", 30 * time.Second, 6, "1m", 30 * time.Minute, 30 * time.Minute, true, true, false, false}, Chart: Chart{true, "1m", []string{"vwap", "sma9", "sma20", "ema9", "ema20", "bollinger20", "volume"}}, Analytics: Analytics{30, "month_to_date", true}}
+	return Config{App: App{"tale-of-the-tape", "127.0.0.1:3000", "America/New_York"}, Storage: Storage{"data/tale-of-the-tape.db", "data/imports", "backups", 5 * time.Second}, Import: Import{"thinkorswim", "America/New_York", "exit_date", .01, 25}, Massive: Massive{"", 30 * time.Second, 6, "1m", 30 * time.Minute, 30 * time.Minute, true, true, false, false}, Chart: Chart{true, "1m", []string{"vwap", "sma9", "sma20", "ema9", "ema20", "bollinger20", "volume"}, "http://localhost:8081"}, Analytics: Analytics{30, "month_to_date", true}}
 }
 func LoadDotEnv(path string) error {
 	f, err := os.Open(path)
