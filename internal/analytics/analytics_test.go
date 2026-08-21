@@ -45,10 +45,30 @@ func TestExtendedStatistics(t *testing.T) {
 	if s.SystemQualityNumber != nil {
 		t.Fatal("SQN must be unavailable below 30 trades")
 	}
-	if s.ProbabilityRandomChance == nil || *s.ProbabilityRandomChance != 1 {
-		t.Fatalf("chance=%v", s.ProbabilityRandomChance)
-	}
 	if s.KRatio == nil {
 		t.Fatal("expected K-ratio")
+	}
+}
+
+func TestBayesianDailyExpectancy(t *testing.T) {
+	p, lower, upper := BayesianDailyExpectancy([]float64{-1, 1})
+	if p == nil || math.Abs(*p-.5) > 1e-12 {
+		t.Fatalf("balanced probability=%v", p)
+	}
+	if lower == nil || upper == nil || *lower >= 0 || *upper <= 0 {
+		t.Fatalf("credible interval=[%v,%v]", lower, upper)
+	}
+	p, _, _ = BayesianDailyExpectancy([]float64{10, 11, 12, 9, 13})
+	if p == nil || *p <= .95 {
+		t.Fatalf("positive probability=%v", p)
+	}
+}
+
+func TestStudentTCDF(t *testing.T) {
+	if got := studentTCDF(1, 1); math.Abs(got-.75) > 1e-12 {
+		t.Fatalf("Cauchy CDF(1)=%g", got)
+	}
+	if got := studentTCDF(0, 10); got != .5 {
+		t.Fatalf("CDF(0)=%g", got)
 	}
 }

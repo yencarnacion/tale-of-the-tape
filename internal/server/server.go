@@ -1111,11 +1111,15 @@ func (s *Server) enrichSummary(ctx context.Context, summary *analytics.Summary, 
 	summary.AverageScratchHoldMinutes = averagePtr(scratchHolds)
 	if len(days) > 0 {
 		summary.AverageDaily = summary.Net / float64(len(days))
+		dailyPnL := make([]float64, 0, len(days))
 		var volume int64
-		for _, value := range dailyVolume {
+		for day, value := range dailyVolume {
 			volume += value
+			dailyPnL = append(dailyPnL, float64(days[day])/float64(positions.Scale))
 		}
 		summary.AverageDailyVolume = float64(volume) / float64(len(days))
+		summary.ExpectancyTradingDays = len(days)
+		summary.ProbabilityPositiveExpectancy, summary.ExpectancyDailyLower90, summary.ExpectancyDailyUpper90 = analytics.BayesianDailyExpectancy(dailyPnL)
 	}
 	summary.AverageMFE, summary.MedianMFE = averagePtr(mfes), medianPtr(mfes)
 	summary.AverageMAE, summary.MedianMAE = averagePtr(maes), medianPtr(maes)
