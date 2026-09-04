@@ -78,6 +78,105 @@ func TestCommitRetainsDistinctSameSecondFills(t *testing.T) {
 	}
 }
 
+func TestCommitPreservesUnchangedRoundTripData(t *testing.T) {
+	s, err := Open(t.TempDir()+"/preserve.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	first := []positions.Execution{
+		{Account: "a", Symbol: "A", Action: "buy", Quantity: 10, Price: 10 * positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "A", Action: "sell", Quantity: 10, Price: 11 * positions.Scale, At: at.Add(time.Minute), Row: 2},
+	}
+	if _, _, err = s.Commit(ctx, "first", "first.csv", first, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantExcursion := Excursion{MFE: 12 * positions.Scale, MAE: -3 * positions.Scale, MFEAt: at.UnixMicro(), MAEAt: at.Add(30 * time.Second).UnixMicro(), Source: "nbbo", Completeness: "complete", Warnings: "preserve me", Events: 42, CalculatedAt: 123}
+	if err = s.SaveExcursion(ctx, 1, wantExcursion); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTradeNote(ctx, 1, "journal note"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.EnsureTradeTag(ctx, 1, "opening drive", "#123456"); err != nil {
+		t.Fatal(err)
+	}
+
+	later := []positions.Execution{
+		{Account: "a", Symbol: "B", Action: "sell", Quantity: 5, Price: 20 * positions.Scale, At: at.Add(time.Hour), Row: 1},
+		{Account: "a", Symbol: "B", Action: "buy", Quantity: 5, Price: 19 * positions.Scale, At: at.Add(time.Hour + time.Minute), Row: 2},
+	}
+	if _, _, err = s.Commit(ctx, "later", "later.csv", later, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	trade, _, err := s.Trade(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trade.Symbol != "A" || trade.Note != "journal note" || len(trade.Tags) != 1 || trade.Tags[0].Name != "opening drive" {
+		t.Fatalf("unchanged trade data was not preserved: %#v", trade)
+	}
+	gotExcursion, err := s.Excursion(ctx, 1)
+	if err != nil || gotExcursion != wantExcursion {
+		t.Fatalf("unchanged excursion=%#v err=%v, want=%#v", gotExcursion, err, wantExcursion)
+	}
+	var newExcursions int
+	if err = s.DB.QueryRow("SELECT count(*) FROM excursion_results WHERE round_trip_id=2").Scan(&newExcursions); err != nil || newExcursions != 0 {
+		t.Fatalf("new trade excursions=%d err=%v", newExcursions, err)
+	}
+}
+
+func TestCommitInvalidatesOnlyChangedRoundTrip(t *testing.T) {
+	s, err := Open(t.TempDir()+"/invalidate.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	at := time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC)
+	initial := []positions.Execution{
+		{Account: "a", Symbol: "A", Action: "buy", Quantity: 100, Price: 10 * positions.Scale, At: at, Row: 1},
+		{Account: "a", Symbol: "A", Action: "sell", Quantity: 100, Price: 12 * positions.Scale, At: at.Add(2 * time.Minute), Row: 2},
+		{Account: "a", Symbol: "B", Action: "buy", Quantity: 1, Price: 20 * positions.Scale, At: at.Add(time.Hour), Row: 3},
+		{Account: "a", Symbol: "B", Action: "sell", Quantity: 1, Price: 21 * positions.Scale, At: at.Add(time.Hour + time.Minute), Row: 4},
+	}
+	if _, _, err = s.Commit(ctx, "initial", "initial.csv", initial, nil); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 2; id++ {
+		if err = s.SaveExcursion(ctx, id, Excursion{MFE: id * positions.Scale, MAE: -id * positions.Scale, Source: "nbbo", Completeness: "complete", Events: 10, CalculatedAt: 123}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// This previously missing partial exit changes A's execution path but has
+	// no relationship to the later B trade.
+	correction := []positions.Execution{
+		{Account: "a", Symbol: "A", Action: "sell", Quantity: 50, Price: 11 * positions.Scale, At: at.Add(time.Minute), Row: 5},
+	}
+	if _, added, commitErr := s.Commit(ctx, "correction", "correction.csv", correction, nil); commitErr != nil || added != 1 {
+		t.Fatalf("added=%d err=%v", added, commitErr)
+	}
+
+	var unchanged, changed int
+	if err = s.DB.QueryRow("SELECT count(*) FROM excursion_results WHERE round_trip_id=2").Scan(&unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow("SELECT count(*) FROM excursion_results x JOIN round_trips r ON r.id=x.round_trip_id WHERE r.symbol='A'").Scan(&changed); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged != 1 || changed != 0 {
+		t.Fatalf("unchanged excursions=%d changed excursions=%d", unchanged, changed)
+	}
+	trade, _, err := s.Trade(ctx, 2)
+	if err != nil || trade.Symbol != "B" || trade.Excursion == nil || trade.Excursion.CalculatedAt != 123 {
+		t.Fatalf("unrelated trade was not preserved: trade=%#v err=%v", trade, err)
+	}
+}
+
 func TestBarCoverageRequiresTheWholeRequestedInterval(t *testing.T) {
 	s, e := Open(t.TempDir()+"/t.db", time.Second)
 	if e != nil {

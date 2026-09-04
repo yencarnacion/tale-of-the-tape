@@ -299,8 +299,13 @@ func (s *Store) Commit(ctx context.Context, sha, name string, execs []positions.
 			return 0, 0, e
 		}
 	}
-	if e = s.rebuildTx(ctx, tx); e != nil {
-		return 0, 0, e
+	// A different statement can contain only executions already seen in an
+	// overlapping export. With no new executions, the canonical trades cannot
+	// have changed and there is nothing to rebuild.
+	if added > 0 {
+		if e = s.rebuildTx(ctx, tx); e != nil {
+			return 0, 0, e
+		}
 	}
 	return int(id), added, tx.Commit()
 }
@@ -313,6 +318,10 @@ func (s *Store) StoreBrokerPnL(ctx context.Context, batchID int, statementDate s
 	return err
 }
 func (s *Store) rebuildTx(ctx context.Context, tx *sql.Tx) error {
+	existing, existingIDs, e := existingRoundTripSignaturesTx(ctx, tx)
+	if e != nil {
+		return e
+	}
 	xs := []positions.Execution{}
 	rows, e := tx.QueryContext(ctx, "SELECT id,account,symbol,action,quantity,price,commission,fees,executed_at,source_row FROM executions ORDER BY account,symbol,executed_at,source_row")
 	if e != nil {
@@ -331,15 +340,21 @@ func (s *Store) rebuildTx(ctx context.Context, tx *sql.Tx) error {
 	if e = rows.Err(); e != nil {
 		return e
 	}
-	// Excursions are derived from round-trip execution membership and must be
-	// recalculated whenever that membership changes.
-	if _, e = tx.ExecContext(ctx, "DELETE FROM excursion_results"); e != nil {
-		return e
-	}
-	if _, e = tx.ExecContext(ctx, "DELETE FROM round_trips"); e != nil {
-		return e
-	}
+	matched := map[int64]bool{}
 	for _, r := range positions.Build(xs) {
+		signature := logicalExecutionSignature(r.Executions)
+		if candidates := existing[signature]; len(candidates) > 0 {
+			rid := candidates[0]
+			existing[signature] = candidates[1:]
+			matched[rid] = true
+			// Membership determines the excursion path. Keep the stable ID and
+			// attached excursion, note, and tags, while refreshing denormalized
+			// summary fields from the current position engine.
+			if _, e = tx.ExecContext(ctx, "UPDATE round_trips SET account=?,symbol=?,direction=?,entry_at=?,exit_at=?,entry_price=?,exit_price=?,max_quantity=?,entered=?,exited=?,gross=?,commissions=?,fees=?,net=? WHERE id=?", r.Account, r.Symbol, r.Direction, r.Entry.UnixMicro(), r.Exit.UnixMicro(), r.EntryPrice, r.ExitPrice, r.MaxQuantity, r.Entered, r.Exited, r.Gross, r.Commissions, r.Fees, r.Net, rid); e != nil {
+				return e
+			}
+			continue
+		}
 		rr, e := tx.ExecContext(ctx, "INSERT INTO round_trips(account,symbol,direction,entry_at,exit_at,entry_price,exit_price,max_quantity,entered,exited,gross,commissions,fees,net) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", r.Account, r.Symbol, r.Direction, r.Entry.UnixMicro(), r.Exit.UnixMicro(), r.EntryPrice, r.ExitPrice, r.MaxQuantity, r.Entered, r.Exited, r.Gross, r.Commissions, r.Fees, r.Net)
 		if e != nil {
 			return e
@@ -351,7 +366,68 @@ func (s *Store) rebuildTx(ctx context.Context, tx *sql.Tx) error {
 			}
 		}
 	}
+	for id := range existingIDs {
+		if matched[id] {
+			continue
+		}
+		// Excursions have a restrictive foreign key rather than ON DELETE
+		// CASCADE. Remove only the result whose execution path changed; notes
+		// and tag assignments then follow the replaced round trip by cascade.
+		if _, e = tx.ExecContext(ctx, "DELETE FROM excursion_results WHERE round_trip_id=?", id); e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, "DELETE FROM round_trips WHERE id=?", id); e != nil {
+			return e
+		}
+	}
 	return nil
+}
+
+// existingRoundTripSignaturesTx returns stable trade IDs keyed by the exact
+// logical execution legs used to calculate an excursion. Raw execution IDs
+// alone are insufficient because a reversing fill can be allocated across two
+// adjacent round trips with different quantities and costs.
+func existingRoundTripSignaturesTx(ctx context.Context, tx *sql.Tx) (map[string][]int64, map[int64]bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT r.id,x.execution_id,
+		COALESCE(x.quantity,e.quantity),COALESCE(x.commission,e.commission),COALESCE(x.fees,e.fees)
+		FROM round_trips r
+		JOIN round_trip_executions x ON x.round_trip_id=r.id
+		JOIN executions e ON e.id=x.execution_id
+		ORDER BY r.id,e.executed_at,e.source_row,e.id`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	byID := map[int64][]positions.Execution{}
+	ids := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		var leg positions.Execution
+		if err = rows.Scan(&id, &leg.ID, &leg.Quantity, &leg.Commission, &leg.Fees); err != nil {
+			return nil, nil, err
+		}
+		byID[id] = append(byID[id], leg)
+		ids[id] = true
+	}
+	if err = rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	bySignature := map[string][]int64{}
+	for id, legs := range byID {
+		signature := logicalExecutionSignature(legs)
+		bySignature[signature] = append(bySignature[signature], id)
+	}
+	return bySignature, ids, nil
+}
+
+func logicalExecutionSignature(execs []positions.Execution) string {
+	var b strings.Builder
+	for _, x := range execs {
+		fmt.Fprintf(&b, "%d:%d:%d:%d;", x.ID, x.Quantity, x.Commission, x.Fees)
+	}
+	return b.String()
 }
 
 // repairLogicalLegs upgrades pre-leg-allocation databases without deleting
